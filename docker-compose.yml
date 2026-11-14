@@ -1,0 +1,23 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: sabor-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sabor
+      POSTGRES_DB: sabor
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-sabor}
+      TZ: America/Recife
+      PGTZ: America/Recife
+    ports:
+      - '${DATABASE_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sabor -d sabor']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
