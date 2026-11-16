@@ -1,53 +1,62 @@
-from sabor.etl.Extract   import Extract
-from sabor.etl.Transform import Transform
-from sabor.etl.Load      import Load
-from sabor.etl.DatabasePurger import DatabasePurger
+from sabor.etl.repo import EtlLotes
+from sabor.etl.repo import EtlPrecos
+from sabor.etl.repo import EtlChunks
+from sabor.etl.repo import EtlPedidos
+from sabor.etl.repo import EtlProdutos
+from sabor.etl.repo import EtlDocumentos
+from sabor.etl.repo import EtlFinanceiro
+from sabor.etl.repo import EtlProdutores
+from sabor.etl.repo import EtlPedidoItens
+from sabor.etl.repo import EtlSazonalidade
+from sabor.etl.repo import EtlProdutorProdutos
+from sabor.etl.repo import EtlProdutoSinonimos
+from sabor.etl.repo import EtlSazonalidadeMensal
 
+from sabor.etl.repo import TruncateTables
 class Pipeline:
 
     def __init__(self, label: str):
-        self.label            = label
-        self.extract_runner   = Extract()
-        self.transform_runner = Transform()
-        self.load_runner      = Load()
-        self.purge_runner     = DatabasePurger()
-        
-    def purge(self):
-        self.divider('-')
-        self.info(f'{self.label}.purge: Executando remoção completa dos dados...')
-        # self.purge_runner.run()
-        self.info(f'{self.label}.purge: Remoção completa dos dados realizada com sucesso!')
-        self.divider('-')
+        self.label = label
 
-    def extract(self):
-        self.divider('-')
-        self.info(f'{self.label}.extract: Executando extração...')
-        self.extract_runner.run()
-        self.info(f'{self.label}.extract: Extração finalizada com sucesso!')
-        self.divider('-')
+        self.truncate = TruncateTables()
 
-    def transform(self):
-        self.divider('-')
-        self.info(f'{self.label}.transform: Executando transformação...')
-        # self.transform_runner = self.extract_runner.df_dict
-        # self.transform_runner.run()
-        self.info(f'{self.label}.transform: Transformação finalizada com sucesso!')
-        self.divider('-')
+        self.etl_lotes = EtlLotes()
+        self.etl_precos = EtlPrecos()
+        self.etl_chuncks = EtlChunks()
+        self.etl_pedidos = EtlPedidos()
+        self.etl_produtos = EtlProdutos()
+        self.etl_documentos = EtlDocumentos()
+        self.etl_financeiro = EtlFinanceiro()
+        self.etl_produtores = EtlProdutores()
+        self.etl_pedido_itens = EtlPedidoItens()
+        self.etl_sazonalidade = EtlSazonalidade()
+        self.etl_produto_sinonimos = EtlProdutoSinonimos()
+        self.etl_produtor_produtos = EtlProdutorProdutos()
+        self.etl_sazonalidade_mensal = EtlSazonalidadeMensal()
 
-    def load(self):
-        self.divider('-')
-        self.info(f'{self.label}.load: Executando carregamento...')
-        self.load_runner.run()
-        self.info(f'{self.label}.load: Carregamento finalizado com sucesso!')
-        self.divider('-')
-
-    def run(self, methods: list) -> None:
+    def run(self) -> None:
         self.divider('=')
         self.info(f'{self.label}.run: Executando ETL...')
-        self.divider('=')
-        for method in methods:
-            getattr(self, method)()
-        self.divider('=')
+        self.divider('-')
+
+        self.truncate.exec()
+        self.etl_pedidos.exec()
+
+        # tratar etl
+        self.etl_produtos.exec()
+        self.etl_produtores.exec()
+        self.etl_precos.exec()
+        self.etl_produto_sinonimos.exec()
+        self.etl_sazonalidade.exec()
+        self.etl_sazonalidade_mensal.exec()
+        self.etl_documentos.exec()
+        self.etl_chuncks.exec()
+        self.etl_pedido_itens.exec()
+        self.etl_produtor_produtos.exec()
+        self.etl_financeiro.exec()
+        self.etl_lotes.exec()
+
+        self.divider('-')
         self.info(f'{self.label}.run: ETL executada com sucesso!')
         self.divider('=')
 
