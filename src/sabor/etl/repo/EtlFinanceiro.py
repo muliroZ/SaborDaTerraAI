@@ -82,15 +82,20 @@ class EtlFinanceiro(Etl):
         ]].merge(df_prod, on='produtor_id', how='left')
 
         def verificar_divergencia(row) -> bool:
-            if row['tipo'] != 'venda' or pd.isna(row['produto_id']):
+            #  letras maiúsculas e espaços ocultos ("Venda" vs "venda")
+            tipo_op = str(row.get('tipo', '')).strip().lower()
+            if tipo_op != 'venda' or pd.isna(row['produto_id']):
                 return False
 
             cobrado = float(row['valor_unitario'])
             prod_nome = str(row['produto']).strip().lower()
             pid = int(row['produto_id'])
+            
+            # Padronizar o comprador em maiúsculas para facilitar a pesquisa
+            comprador = str(row.get('comprador_normalizado', '')).upper()
 
-            # Regra contratual PNAE (preço fixo)
-            if 'PNAE' in str(row['comprador_normalizado']) and prod_nome in precos_pnae:
+            # Regra contratual PNAE (abrangendo a palavra PREFEITURA explicitamente)
+            if ('PNAE' in comprador or 'PREFEITURA' in comprador) and prod_nome in precos_pnae:
                 return abs(cobrado - precos_pnae[prod_nome]) > 0.01
 
             # Verificar se o produtor tinha certificação orgânica vigente na data da venda
