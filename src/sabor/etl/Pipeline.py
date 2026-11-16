@@ -44,9 +44,9 @@ class Pipeline:
 
         # tratar etl
         self.etl_produtos.exec()
+        self.etl_produto_sinonimos.exec()  
         self.etl_produtores.exec()
         self.etl_precos.exec()
-        self.etl_produto_sinonimos.exec()
         self.etl_sazonalidade.exec()
         self.etl_sazonalidade_mensal.exec()
         self.etl_documentos.exec()

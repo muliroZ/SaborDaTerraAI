@@ -9,20 +9,22 @@ class EtlSazonalidade(Etl):
 
         self.df        = None
         self.table     = "sazonalidade"
-        # self.file_path = self.path / '.csv'
-        # self.dtype = {
-
-        # }
+        self.file_path = self.path / 'sazonalidade.csv'
 
     def extract(self):
         self.info(f"-- Extract: {self.table}")
-        # self.df = pd.read_csv(self.file_path, encoding="utf-8", dtype=self.dtype)
+
+        self.df = pd.read_csv(self.file_path, encoding="utf-8")
 
     def transform(self):
-        self.info(f"-- Transform: {self.table}")
+        # Filtrar apenas as colunas que pertencem à tabela sazonalidade
+        self.df = self.df[['produto', 'observacao']].copy()
+        self.df['produto_id'] = self.mapear_produto_id(self.df['produto'])
 
     def load(self):
         self.info(f"-- Load: {self.table}")
+        self.driver.insert(self.table, self.df)
+        self.driver.close()
 
     def exec(self):
         self.divider('-')

@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS financeiro (
     data_pagamento         date,
     chave_pix_deposito     text,
     observacao             text,
+    alerta_divergencia     boolean NOT NULL DEFAULT false,
     CHECK (status_pagamento = 'pago' OR data_pagamento IS NULL)
 );
 
@@ -198,6 +199,8 @@ COMMENT ON COLUMN financeiro.quantidade IS
     'quantidade_kg da fonte; a unidade real está em `unidade` (alface em unidades, ovos em dúzias).';
 COMMENT ON COLUMN financeiro.status_pagamento IS
     'Atraso não é um status: compare data_vencimento com DATA_REF_DATE.';
+COMMENT ON COLUMN financeiro.alerta_divergencia IS
+    'Flag gerada pelo ETL para indicar divergência entre o valor_unitario cobrado e a tabela de preços oficial.';
 
 CREATE INDEX IF NOT EXISTS financeiro_produtor_idx ON financeiro (produtor_id);
 CREATE INDEX IF NOT EXISTS financeiro_pendentes_idx ON financeiro (data_vencimento)
