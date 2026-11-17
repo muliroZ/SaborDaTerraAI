@@ -323,3 +323,19 @@ CREATE TABLE IF NOT EXISTS auditoria_mensagens (
 
 CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
+
+-- ---------------------------------------------------------------------------
+-- Role somente leitura para o agente (apenas SELECT)
+-- ---------------------------------------------------------------------------
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sabor_ro') THEN
+        CREATE ROLE sabor_ro NOLOGIN;
+    END IF;
+END
+$$;
+
+GRANT USAGE ON SCHEMA public TO sabor_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO sabor_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO sabor_ro;

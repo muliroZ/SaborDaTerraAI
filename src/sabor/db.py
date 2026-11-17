@@ -6,10 +6,14 @@ from importlib.resources import files
 from urllib.parse import quote
 
 import psycopg
+from psycopg import sql
 from dotenv import load_dotenv
 
 EMBEDDING_DIM = 768
 """Dimensão dos embeddings (gemini-embedding-001 com MRL); igual a `vector(768)` no schema."""
+
+READONLY_ROLE = 'sabor_ro'
+"""Role PostgreSQL com permissão exclusiva de SELECT para uso pelo agente."""
 
 # Ordem de remoção: dependentes antes das tabelas referenciadas.
 TABELAS = (
@@ -52,6 +56,15 @@ def conectar(url: str | None = None, tentativas: int = 30, **kwargs) -> psycopg.
                 raise
             time.sleep(1)
     raise AssertionError('inalcançável')
+
+
+def conectar_readonly(url: str | None = None, tentativas: int = 30, **kwargs) -> psycopg.Connection:
+    """Abre uma conexão somente leitura restrita à role `sabor_ro` (apenas SELECT)."""
+    conn = conectar(url, tentativas=tentativas, **kwargs)
+    with conn.transaction():
+        conn.execute(sql.SQL('SET ROLE {}').format(sql.Identifier(READONLY_ROLE)))
+    conn.read_only = True
+    return conn
 
 
 def schema_sql() -> str:
