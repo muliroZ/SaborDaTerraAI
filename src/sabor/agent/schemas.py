@@ -1,29 +1,9 @@
-"""Agente único PydanticAI e orquestração de turno do SaborDaTerraAI."""
+"""Contratos Pydantic de saída estruturada do LLM, tentativas de fallback e turno."""
 
-from dataclasses import dataclass, field
-from datetime import date
-import os
-from typing import Any
+from collections.abc import Sequence
 
-from dotenv import load_dotenv
-import psycopg
 from pydantic import BaseModel, Field
-
-DATA_REF_PADRAO = date(2026, 10, 30)
-"""Retrato padrão dos dados operacionais e documentais (30/10/2026)."""
-
-
-def obter_data_referencia() -> date:
-    """Retorna a data de referência configurada em `DATA_REF_DATE` ou `2026-10-30`."""
-    load_dotenv()
-    if valor := os.getenv('DATA_REF_DATE'):
-        return date.fromisoformat(valor.strip())
-    return DATA_REF_PADRAO
-
-
-# ---------------------------------------------------------------------------
-# 3.1 Modelos de saída estruturada do LLM (Etapa 3.4: output_type)
-# ---------------------------------------------------------------------------
+from pydantic_ai.messages import ModelRequestAttempt
 
 
 class Fonte(BaseModel):
@@ -67,35 +47,24 @@ class RespostaAgente(BaseModel):
     rascunhos: list[Rascunho] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# 3.2 Dependências injetadas no Agente (deps_type)
-# ---------------------------------------------------------------------------
+class TentativaFallback(BaseModel):
+    """Registro de uma tentativa de modelo que falhou ou teve resposta rejeitada."""
 
+    modelo: str
+    provedor: str | None = None
+    outcome: str
+    erro: str | None = None
+    duracao_ms: int = 0
 
-class MascaradorNoOp:
-    """Implementação padrão (identidade) até a conexão com o mascarador de PII (#33)."""
-
-    def mascarar(self, texto: str) -> str:
-        return texto
-
-    def restaurar(self, texto: str) -> str:
-        return texto
-
-
-@dataclass
-class AgentDeps:
-    """Contexto de execução injetado nas ferramentas e no system prompt do agente."""
-
-    conn: psycopg.Connection
-    data_referencia: date = field(default_factory=obter_data_referencia)
-    dataset_version: str = 'v1'
-    usuario: str = 'Dona Lúcia'
-    mascarador: Any = field(default_factory=MascaradorNoOp)
-
-
-# ---------------------------------------------------------------------------
-# 3.3 Retorno consolidado do turno (processar_turno)
-# ---------------------------------------------------------------------------
+    @classmethod
+    def de_attempt(cls, attempt: ModelRequestAttempt) -> 'TentativaFallback':
+        return cls(
+            modelo=attempt.model_name,
+            provedor=attempt.provider_name,
+            outcome=attempt.outcome,
+            erro=attempt.error,
+            duracao_ms=int(attempt.duration.total_seconds() * 1000),
+        )
 
 
 class RespostaTurno(BaseModel):
@@ -111,6 +80,7 @@ class RespostaTurno(BaseModel):
     falha_segura: bool = False
     modelo_efetivo: str | None = None
     provedor_efetivo: str | None = None
+    tentativas_fallback: list[TentativaFallback] = Field(default_factory=list)
     latencia_ms: int = 0
 
     @classmethod
@@ -122,6 +92,7 @@ class RespostaTurno(BaseModel):
         *,
         modelo_efetivo: str | None = None,
         provedor_efetivo: str | None = None,
+        tentativas_fallback: Sequence[TentativaFallback] = (),
         latencia_ms: int = 0,
     ) -> 'RespostaTurno':
         return cls(
@@ -133,5 +104,6 @@ class RespostaTurno(BaseModel):
             rascunhos=list(resposta.rascunhos),
             modelo_efetivo=modelo_efetivo,
             provedor_efetivo=provedor_efetivo,
+            tentativas_fallback=list(tentativas_fallback),
             latencia_ms=latencia_ms,
         )
