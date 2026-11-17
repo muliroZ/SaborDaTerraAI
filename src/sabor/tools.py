@@ -1,20 +1,36 @@
-"""Ferramenta `consultar_dados` (Issue #7).
+from __future__ import annotations
+
+
+"""Ferramentas (tools) read-only do agente SaborDaTerraAI.
+
+Convenções para implementação das ferramentas (Issues #7, #8, #9, #11, #12):
+1. Nomenclatura: defina as funções públicas em `snake_case` (sem prefixo `_`).
+   O agente descobre e registra automaticamente as funções públicas definidas neste módulo.
+   Nomes de referência previstos na arquitetura:
+   - `extrair_e_classificar_pedido` (Pilar 4.1 - Issue #9)
+   - `consultar_dados` (SQL parametrizada - Issue #7)
+   - `buscar_documentos` (Pilar 4.2: busca híbrida lexical + vetorial - Issue #8)
+   - `resumir_produtor` (Pilar 4.3: resumo do produtor - Issue #11)
+   - `rascunhar_notificacao` (Pilar 4.3: notificação e proposta de alocação - Issue #12)
+   Caso seja necessário criar ferramentas auxiliares adicionais, basta seguir `snake_case`.
+
+2. Assinatura e Acesso a Dados:
+   - Receba `ctx: RunContext[AgentDeps]` como primeiro parâmetro quando precisar de contexto.
+   - Utilize exclusivamente `ctx.deps.conn` (conexão somente leitura `sabor_ro`) e
+     `ctx.deps.data_referencia` para regras temporais.
+"""
+
+"""Ferramentas (tools) read-only do agente SaborDaTerraAI (Issue #7).
 
 SQL parametrizada e read-only sobre produtores, financeiro, lotes, preços e
-sazonalidade. Nenhuma função aqui monta SQL a partir de texto do usuário:
-os parâmetros opcionais só decidem QUAIS cláusulas fixas entram na
-consulta — nunca o texto da cláusula — e todo valor sempre vai como
-parâmetro (%s), nunca por f-string/concatenação.
+sazonalidade. Todas as funções públicas em `snake_case` recebem
+`ctx: RunContext[AgentDeps]` e utilizam `ctx.deps.conn` (`sabor_ro`).
+
 
 Estado das dependências quando este arquivo foi escrito (17/11/2026):
 
   - #4 (carga dos dados): concluída. As queries assumem o schema de
     `docs/Arquitetura...md` / `schema.sql` já populado.
-  - #6 (agente PydanticAI): NÃO iniciada. Por isso estas funções ainda não
-    são `@agent.tool`; são funções puras que recebem a conexão read-only e
-    o perfil do usuário como parâmetros. Quando #6 existir, basta registrar
-    cada uma com `@agent.tool` e, no corpo, repassar
-    `ctx.deps.db_conn`, `ctx.deps.usuario`, `ctx.deps.mascarador`.
   - #33 (mascarador): NÃO iniciada. Ver `Mascarador` / `SEM_MASCARAMENTO`
     abaixo — a assinatura já prevê o parâmetro, mas por enquanto ele não
     mascara nada.
@@ -25,23 +41,21 @@ Estado das dependências quando este arquivo foi escrito (17/11/2026):
     
 """
 
-from __future__ import annotations
-
 import re
 from datetime import date
 from typing import Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel, Field
+from pydantic_ai import RunContext
+
+from sabor.agent.deps import AgentDeps
 
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
 
-# docs/README.md: "os dados representam um retrato da operação em 30/10/2026".
 DATA_REFERENCIA_PADRAO = date(2026, 10, 30)
-
-# precos.referencia é por mês (ex.: 2026-10-01); a tabela carregada é a de out/2026.
 TABELA_PRECOS_REFERENCIA_PADRAO = date(2026, 10, 1)
 
 _MESES = {
@@ -51,14 +65,12 @@ _MESES = {
 
 
 # ---------------------------------------------------------------------------
-# Perfil do usuário (placeholder da Issue #13) e aplicação do filtro de linha
+# Perfil do usuário e aplicação do filtro de linha
 # ---------------------------------------------------------------------------
 
 class Usuario(BaseModel):
-    """Perfil simulado logado. Decide o filtro de linha aplicado nas tools.
+    """Perfil simulado logado. Decide o filtro de linha aplicado nas tools."""
 
-    Placeholder até a Issue #13 definir o seletor de usuário real.
-    """
     perfil: Literal['funcionario', 'produtor']
     produtor_id: str | None = None  # obrigatório quando perfil == 'produtor'
 
@@ -67,14 +79,22 @@ class SemPermissao(PermissionError):
     """Perfil produtor tentando ver dado de outro produtor."""
 
 
+def _resolver_usuario(usuario: Usuario | str) -> Usuario:
+    """Converte `AgentDeps.usuario` (str ou Usuario) para o contrato `Usuario`."""
+    if isinstance(usuario, Usuario):
+        return usuario
+    texto = usuario.strip()
+    if re.fullmatch(r'P\d{3}', texto, re.IGNORECASE):
+        return Usuario(perfil='produtor', produtor_id=texto.upper())
+    return Usuario(perfil='funcionario')
+
+
 def _aplicar_filtro_produtor(usuario: Usuario, produtor_id: str | None) -> str | None:
     """Resolve o produtor_id efetivo da consulta, aplicando o perfil.
 
-    - Perfil funcionário: passa produtor_id como veio (None = sem filtro,
-      vê todo mundo).
+    - Perfil funcionário: passa produtor_id como veio (None = sem filtro).
     - Perfil produtor: sempre trava no próprio produtor_id. Se pedir
-      explicitamente o dado de outro produtor, nega (SemPermissao) em vez
-      de silenciosamente ignorar o pedido.
+      explicitamente o dado de outro produtor, nega com `SemPermissao`.
     """
     if usuario.perfil == 'funcionario':
         return produtor_id
@@ -88,7 +108,7 @@ def _aplicar_filtro_produtor(usuario: Usuario, produtor_id: str | None) -> str |
 
 
 # ---------------------------------------------------------------------------
-# Mascarador (placeholder da Issue #33)
+# Mascarador (interface esperada da Issue #33)
 # ---------------------------------------------------------------------------
 
 class Mascarador(Protocol):
@@ -98,7 +118,7 @@ class Mascarador(Protocol):
 
 
 class _SemMascaramento:
-    """No-op: usado enquanto a Issue #33 não existe. NÃO é a implementação final."""
+    """No-op: usado enquanto a Issue #33 não existe."""
 
     def mascarar(self, texto: str) -> str:
         return texto
@@ -112,20 +132,19 @@ def _mascarar_opcional(mascarador: Mascarador, valor: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Fonte (convenção de citação de docs/README.md)
+# Fonte (convenção de citação)
 # ---------------------------------------------------------------------------
 
 class Fonte(BaseModel):
     arquivo: str
     registro: str | None = None
 
-    def __str__(self) -> str:  # "financeiro.csv · FIN-2026-013"
+    def __str__(self) -> str:
         return f"{self.arquivo} · {self.registro}" if self.registro else self.arquivo
 
 
 # ---------------------------------------------------------------------------
-# Resolução de produto_id (nome ou sinônimo) — mesma ideia de
-# Etl.mapear_produto_id, mas lendo da conexão read-only do agente.
+# Resolução de produto_id (nome ou sinônimo)
 # ---------------------------------------------------------------------------
 
 def _resolver_produto_id(conn: psycopg.Connection, nome_ou_sinonimo: str) -> int | None:
@@ -154,7 +173,6 @@ class ProdutorResultado(BaseModel):
     validade_certificacao: date | None
     registro_sie: str | None
     dap_caf: str | None
-    # Dados pessoais — passam pelo mascarador antes de sair da tool.
     cpf: str | None
     telefone: str | None
     email: str | None
@@ -166,17 +184,19 @@ class ProdutorResultado(BaseModel):
 
 
 def buscar_produtores(
-    conn: psycopg.Connection,
-    usuario: Usuario,
+    ctx: RunContext[AgentDeps],
     *,
     produto: str | None = None,
     municipio: str | None = None,
     organico: bool | None = None,
     ativo: bool | None = None,
-    data_referencia: date = DATA_REFERENCIA_PADRAO,
-    mascarador: Mascarador = SEM_MASCARAMENTO,
 ) -> list[ProdutorResultado]:
     """Busca produtores por produto/categoria, município, orgânico e status."""
+    conn = ctx.deps.conn
+    usuario = _resolver_usuario(ctx.deps.usuario)
+    data_referencia = ctx.deps.data_referencia
+    mascarador = ctx.deps.mascarador
+
     produtor_id_filtro = _aplicar_filtro_produtor(usuario, None)
 
     condicoes: list[str] = []
@@ -212,7 +232,6 @@ def buscar_produtores(
             )
             parametros.append(produto_id)
         else:
-            # Não é nome/sinônimo conhecido: tenta como categoria (decisão 16/11).
             condicoes.append(
                 "p.id IN ("
                 "SELECT pp.produtor_id FROM produtor_produtos pp "
@@ -288,7 +307,7 @@ class ItemFinanceiro(BaseModel):
     data_vencimento: date | None
     data_pagamento: date | None
     alerta_divergencia: bool
-    chave_pix_deposito: str | None  # dado pessoal — passa pelo mascarador
+    chave_pix_deposito: str | None
     fonte: Fonte
 
 
@@ -301,8 +320,7 @@ class ResumoFinanceiro(BaseModel):
 
 
 def consultar_financeiro(
-    conn: psycopg.Connection,
-    usuario: Usuario,
+    ctx: RunContext[AgentDeps],
     *,
     produtor_id: str | None = None,
     comprador: str | None = None,
@@ -310,17 +328,13 @@ def consultar_financeiro(
     periodo_fim: date | None = None,
     status: Literal['pago', 'pendente', 'vencido'] | None = None,
     apenas_divergentes: bool = False,
-    data_referencia: date = DATA_REFERENCIA_PADRAO,
-    mascarador: Mascarador = SEM_MASCARAMENTO,
 ) -> ResumoFinanceiro:
-    """Vendas, pendências e vencidos (vs. data_referencia). "vencido" não é
-    um status na fonte: é status_pagamento='pendente' com vencimento passado.
+    """Consulta vendas, pendências e vencidos em relação à data de referência."""
+    conn = ctx.deps.conn
+    usuario = _resolver_usuario(ctx.deps.usuario)
+    data_referencia = ctx.deps.data_referencia
+    mascarador = ctx.deps.mascarador
 
-    `alerta_divergencia` (preço cobrado x tabela de preços na data da venda)
-    já vem calculado por EtlFinanceiro e é só exposto aqui, por transação;
-    não é recalculado nesta função. `apenas_divergentes=True` filtra só as
-    transações com esse alerta.
-    """
     produtor_id_filtro = _aplicar_filtro_produtor(usuario, produtor_id)
 
     condicoes: list[str] = []
@@ -425,16 +439,15 @@ _PADRAO_NUMERO = re.compile(r'(\d{4})[-\s]?(\d{3,4})')
 
 
 def rastrear_lote(
-    conn: psycopg.Connection,
-    usuario: Usuario,
+    ctx: RunContext[AgentDeps],
     *,
     lote_id: str | None = None,
     texto: str | None = None,
 ) -> RastrearLoteResultado:
-    """Aceita o ID exato (LOT-2026-0089) ou uma referência aproximada do
-    usuário (ex.: "lote 2024-089"), casando pelo sufixo numérico e pedindo
-    confirmação quando a referência não bate 1:1 com um ID real.
-    """
+    """Rastreia lote por ID exato (LOT-2026-0089) ou referência aproximada (ex.: 'lote 2024-089')."""
+    conn = ctx.deps.conn
+    usuario = _resolver_usuario(ctx.deps.usuario)
+
     if not lote_id and not texto:
         raise ValueError("Informe lote_id ou texto.")
 
@@ -455,8 +468,6 @@ def rastrear_lote(
             mensagem=f"Não encontrei um identificador de lote em '{bruto}'.",
         )
 
-    # Ignora o ano informado (pode divergir, ver projeto.md pergunta 2) e casa
-    # pelo número final sem zeros à esquerda.
     sufixo = match.group(2).lstrip('0') or '0'
     linhas = conn.execute(
         "SELECT lote_id FROM lotes WHERE lote_id LIKE %s", ('LOT-%-%',)
@@ -506,7 +517,6 @@ def _montar_resultado_lote(
     (lid, produto, pid, pnome, qtd, uni, colheita, entrega, comprador,
      refrig, temp, validade, insp, transacao_id) = linha
 
-    # Perfil produtor: nunca enxerga lote de outro produtor.
     if usuario.perfil == 'produtor' and pid != usuario.produtor_id:
         raise SemPermissao(f"Perfil produtor ({usuario.produtor_id}) não pode ver o lote {lid}.")
 
@@ -548,16 +558,15 @@ class PrecoResultado(BaseModel):
 
 
 def consultar_preco(
-    conn: psycopg.Connection,
+    ctx: RunContext[AgentDeps],
     produto: str,
     *,
     organico: bool | None = None,
     quantidade: float | None = None,
     referencia: date = TABELA_PRECOS_REFERENCIA_PADRAO,
 ) -> PrecoResultado | None:
-    """Preço vigente (convencional ou orgânico) + regra de atacado, replicando
-    a lógica de faixas de `EtlFinanceiro.transform` sobre `precos`.
-    """
+    """Consulta preço vigente (convencional ou orgânico) e regra de desconto de atacado."""
+    conn = ctx.deps.conn
     produto_id = _resolver_produto_id(conn, produto)
     if produto_id is None:
         return None
@@ -614,10 +623,12 @@ class SafraResultado(BaseModel):
 
 
 def consultar_safra(
-    conn: psycopg.Connection,
+    ctx: RunContext[AgentDeps],
     produto: str,
     mes: int | str,
 ) -> SafraResultado | None:
+    """Consulta disponibilidade sazonal de um produto em determinado mês (1-12 ou abreviação)."""
+    conn = ctx.deps.conn
     produto_id = _resolver_produto_id(conn, produto)
     if produto_id is None:
         return None

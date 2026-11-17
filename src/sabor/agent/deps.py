@@ -1,12 +1,13 @@
 """Contexto de dependências (`AgentDeps`) e configuração de data de referência."""
 
-from dataclasses import dataclass, field
+from dataclasses import Field, dataclass, field
 from datetime import date
 import os
 from typing import Any
 
 from dotenv import load_dotenv
 import psycopg
+from pydantic import ConfigDict, BaseModel, Field
 
 DATA_REF_PADRAO = date(2026, 10, 30)
 """Retrato padrão dos dados operacionais e documentais (30/10/2026)."""
