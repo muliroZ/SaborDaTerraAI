@@ -161,14 +161,22 @@ def test_conexao_readonly_permite_select_e_bloqueia_escrita(conn):
         usuario = ro_conn.execute('SELECT current_user').fetchone()[0]
         assert usuario == READONLY_ROLE
         assert ro_conn.execute('SELECT count(*) FROM produtores').fetchone()[0] == 0
+        assert ro_conn.execute('SELECT count(*) FROM chunks_busca').fetchone()[0] == 0
 
         erros_bloqueio = (
             psycopg.errors.ReadOnlySqlTransaction,
             psycopg.errors.InsufficientPrivilege,
         )
-        with pytest.raises(erros_bloqueio):
-            ro_conn.execute(
+        comandos_escrita = [
+            (
                 'INSERT INTO produtores (id, nome_completo, municipio, status) '
                 "VALUES ('P001', 'Teste', 'Garanhuns', 'ativo')"
-            )
+            ),
+            "UPDATE produtores SET status = 'inativo' WHERE id = 'P001'",
+            "DELETE FROM produtores WHERE id = 'P001'",
+            'DROP TABLE produtores',
+        ]
+        for sql_cmd in comandos_escrita:
+            with pytest.raises(erros_bloqueio), ro_conn.transaction():
+                ro_conn.execute(sql_cmd)
 
