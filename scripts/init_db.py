@@ -4,6 +4,8 @@ Uso:
     docker compose up -d
     uv run python scripts/init_db.py            # cria o que faltar (idempotente)
     uv run python scripts/init_db.py --reset    # APAGA as tabelas do projeto e recria
+    uv run python scripts/etl.py                # executa o ETL completo, populando as tabelas (produtos, produtores, preços, etc.)
+    uv run python scripts/ingest_docs.py        # ingere documentos, gera embeddings, completa as tabelas(certificados, contratos)
 """
 
 import argparse

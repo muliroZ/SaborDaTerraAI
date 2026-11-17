@@ -26,6 +26,7 @@ TABELAS = (
     'produto_sinonimos',
     'produtos',
     'produtores',
+    "auditoria_mensagens",
 )
 VIEWS = ('chunks_busca',)
 
