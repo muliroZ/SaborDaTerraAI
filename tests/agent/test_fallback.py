@@ -196,3 +196,53 @@ def test_extrair_tentativas_quando_todos_modelos_falham():
     tentativas = extrair_tentativas_de_excecao(exc_info.value)
     assert [t.modelo for t in tentativas] == [MODELO_PRIMARIO, MODELO_FALLBACK_1]
     assert all(t.outcome == 'error' for t in tentativas)
+
+
+def test_modelo_fallback_segue_ferramentas_e_output_type():
+    tool_executada = False
+
+    def consultar_dados(dominio: str) -> str:
+        nonlocal tool_executada
+        tool_executada = True
+        return f'dados_de_{dominio}'
+
+    def fn_primario_timeout(messages, info: AgentInfo) -> ModelResponse:
+        raise TimeoutError('Gemini timeout')
+
+    passo_qwen = 0
+
+    def fn_qwen_usa_tool_e_responde(messages, info: AgentInfo) -> ModelResponse:
+        nonlocal passo_qwen
+        passo_qwen += 1
+        if passo_qwen == 1:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='consultar_dados', args={'dominio': 'lotes'})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'Lote consultado via fallback [lotes.csv · LOT-2026-0089].',
+                        'fontes': [{'arquivo': 'lotes.csv', 'referencia': 'LOT-2026-0089'}],
+                        'flags': [],
+                        'rascunhos': [],
+                    },
+                )
+            ]
+        )
+
+    m1 = FunctionModel(fn_primario_timeout, model_name=MODELO_PRIMARIO)
+    m2 = FunctionModel(fn_qwen_usa_tool_e_responde, model_name=MODELO_FALLBACK_1)
+
+    agente_teste = Agent(
+        output_type=RespostaAgente,
+        tools=[consultar_dados],
+        retries=0,
+        capabilities=[construir_capability_fallback([m1, m2])],
+    )
+
+    resultado = agente_teste.run_sync('Consulte os lotes')
+    assert tool_executada is True
+    assert resultado.output.fontes[0].formatar() == '[lotes.csv · LOT-2026-0089]'
+
