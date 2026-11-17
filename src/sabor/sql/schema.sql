@@ -300,3 +300,26 @@ SELECT c.id,
        d.metadados || c.metadados AS metadados
 FROM chunks c
 JOIN documentos d USING (arquivo);
+
+-- ---------------------------------------------------------------------------
+-- Auditoria de Mensagens (#6)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS auditoria_mensagens (
+    id                  bigserial PRIMARY KEY,
+    pedido_id           text REFERENCES pedidos (id) ON DELETE SET NULL,
+    sessao_id           text,
+    canal               text,
+    mensagem_usuario    text NOT NULL,
+    resposta_assistente text NOT NULL,
+    fontes_citadas      text[] NOT NULL DEFAULT '{}',
+    ferramentas_usadas  jsonb NOT NULL DEFAULT '[]', 
+    modelo_llm          text,
+    tokens_entrada      integer,
+    tokens_saida        integer,
+    latencia_ms         integer,
+    criado_em           timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
+CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
