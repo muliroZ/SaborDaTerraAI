@@ -14,14 +14,23 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from sabor.db import (
     EMBEDDING_DIM,
+    READONLY_ROLE,
     TABELAS,
     conectar,
+    conectar_readonly,
     criar_schema,
     database_url,
     resetar_schema,
     schema_sql,
     tabelas_existentes,
 )
+
+
+def test_role_readonly_definida_no_schema_sem_senha_exposta():
+    sql = schema_sql()
+    assert f'CREATE ROLE {READONLY_ROLE} NOLOGIN' in sql
+    assert f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO {READONLY_ROLE}' in sql
+    assert 'PASSWORD' not in sql.upper()
 
 
 def test_dimensao_do_embedding_igual_ao_schema():
@@ -144,3 +153,30 @@ def test_reset_apaga_dados(conn):
     resetar_schema(conn)
     assert conn.execute('SELECT count(*) FROM produtores').fetchone()[0] == 0
     assert sorted(tabelas_existentes(conn)) == sorted(TABELAS)
+
+
+def test_conexao_readonly_permite_select_e_bloqueia_escrita(conn):
+    with conectar_readonly(conn.info.dsn, tentativas=1) as ro_conn:
+        assert ro_conn.read_only is True
+        usuario = ro_conn.execute('SELECT current_user').fetchone()[0]
+        assert usuario == READONLY_ROLE
+        assert ro_conn.execute('SELECT count(*) FROM produtores').fetchone()[0] == 0
+        assert ro_conn.execute('SELECT count(*) FROM chunks_busca').fetchone()[0] == 0
+
+        erros_bloqueio = (
+            psycopg.errors.ReadOnlySqlTransaction,
+            psycopg.errors.InsufficientPrivilege,
+        )
+        comandos_escrita = [
+            (
+                'INSERT INTO produtores (id, nome_completo, municipio, status) '
+                "VALUES ('P001', 'Teste', 'Garanhuns', 'ativo')"
+            ),
+            "UPDATE produtores SET status = 'inativo' WHERE id = 'P001'",
+            "DELETE FROM produtores WHERE id = 'P001'",
+            'DROP TABLE produtores',
+        ]
+        for sql_cmd in comandos_escrita:
+            with pytest.raises(erros_bloqueio), ro_conn.transaction():
+                ro_conn.execute(sql_cmd)
+
