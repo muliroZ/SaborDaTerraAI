@@ -34,8 +34,11 @@ tests/
     ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
     ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
     ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
-    ├── test_prompts_tools.py# Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
-    └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
+    ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
+    └── test_runner.py      # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
+└── tools/   
+    └── test_consulta_dados.py # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
+    └── conftest.py # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
 ```
 
 ---
@@ -111,7 +114,8 @@ Implementada com a capability oficial `ModelFallback` do PydanticAI `2.68.0`:
 
 O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extensão prontos. Abaixo está o guia exato do que cada issue pendente deve fazer quando for implementada:
 
-### 🔧 Issues `#7`, `#8`, `#9`, `#11` e `#12` — Ferramentas do Agente (`src/sabor/tools.py`)
+### 🔧 Issues `, `#8`, `#9`, `#11` e `#12` — Ferramentas do Agente (`src/sabor/tools.py`)
+
 - **Onde implementar:** Diretamente em [`src/sabor/tools.py`](../../src/sabor/tools.py).
 - **Como o agente descobre:** A função `carregar_ferramentas_registradas()` em [`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py) inspeciona `sabor.tools` automaticamente e registra no `Agent` todas as funções públicas em `snake_case` (sem `_` no início).
 - **Nomes de referência esperados:**
@@ -123,6 +127,16 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Regra caso criem ferramentas extras:** Qualquer função pública adicional criada em `src/sabor/tools.py` usando `snake_case` será registrada automaticamente pelo agente. Funções auxiliares internas devem começar com `_` (ex.: `_montar_filtro_sql`) para não serem expostas como tool ao LLM.
 - **Acesso ao banco nas tools:** Usar sempre `ctx.deps.conn` (que já é `sabor_ro` *read-only*) e `ctx.deps.data_referencia`. Se a tool ler dados pessoais (`produtores`, `financeiro`), passar pelo `ctx.deps.mascarador.mascarar(...)` antes de devolver ao LLM.
 
+### ✅ Issue `#7` — Ferramentas de Consulta SQL Read-Only (`src/sabor/tools.py`) — *Concluída*
+- **Ferramentas já registradas no agente (`ctx: RunContext[AgentDeps]`):**
+  - `buscar_produtores(...)` — Filtra produtores por produto/categoria, município, certificação orgânica vigente (`ctx.deps.data_referencia`) e status.
+  - `consultar_financeiro(...)` — Consulta vendas, pagamentos, pendências, inadimplência (`vencido`) e alertas de divergência.
+  - `rastrear_lote(...)` — Rastreia lote por ID exato (`LOT-2026-0089`) ou referência aproximada (`lote 2024-089`).
+  - `consultar_preco(...)` — Consulta preço vigente (convencional/orgânico) e faixa de desconto de atacado.
+  - `consultar_safra(...)` — Consulta disponibilidade sazonal por produto e mês (`1–12` ou abreviação).
+- **Filtro de permissão por perfil (`_resolver_usuario`):** Converte `ctx.deps.usuario` (`str`) automaticamente: se vier no formato de ID de produtor (`P001`, `P003`, etc.), trava a consulta nos dados daquele produtor e bloqueia tentativas de acesso a terceiros com `SemPermissao`; qualquer outro nome (ex.: `'Dona Lúcia'`) opera com perfil `'funcionario'`.
+- **Mascaramento PII:** Já integrado a `ctx.deps.mascarador.mascarar(...)` nos campos sensíveis de `produtores` e `financeiro`.
+### -----------------------------------------------------------------------------------------
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
@@ -164,7 +178,8 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
   turno = processar_turno(
       sessao_id=st.session_state.sessao_id,
       mensagem=mensagem_usuario,
-      usuario=usuario_selecionado,  # ex.: "Dona Lúcia" ou "Seu Antônio"
+      usuario=usuario_selecionado, # ex.: "Dona Lúcia" (funcionário) ou "P001" (trava no produtor P001)
+  )
   )
   # Exibir turno.texto, turno.fontes, turno.flags e turno.rascunhos
   ```
