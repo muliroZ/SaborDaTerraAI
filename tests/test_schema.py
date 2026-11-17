@@ -4,6 +4,7 @@ Os testes de integração criam um banco temporário no Postgres do docker-compo
 então não tocam no banco de desenvolvimento. São pulados se o banco não estiver no ar.
 """
 
+import os
 import re
 import uuid
 from decimal import Decimal
@@ -156,7 +157,11 @@ def test_reset_apaga_dados(conn):
 
 
 def test_conexao_readonly_permite_select_e_bloqueia_escrita(conn):
-    with conectar_readonly(conn.info.dsn, tentativas=1) as ro_conn:
+    # Puxa a senha do .env (ou usa "sabor" como padrão)
+    senha_db = os.getenv("DATABASE_PASSWORD", "sabor")
+    
+    # Repassa a senha no parâmetro password
+    with conectar_readonly(conn.info.dsn, password=senha_db, tentativas=1) as ro_conn:
         assert ro_conn.read_only is True
         usuario = ro_conn.execute('SELECT current_user').fetchone()[0]
         assert usuario == READONLY_ROLE

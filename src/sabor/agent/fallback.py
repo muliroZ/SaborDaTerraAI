@@ -40,8 +40,8 @@ MODELO_FALLBACK_1 = 'qwen/qwen3-32b'
 MODELO_FALLBACK_2 = 'mistralai/mistral-small-3.2-24b-instruct'
 """Segundo modelo de contingência via OpenRouter (ADR)."""
 
-TIMEOUT_POR_MODELO_S = 4.0
-"""Timeout individual por chamada de modelo (em segundos) para caber no SLA global de 10s."""
+TIMEOUT_POR_MODELO_S = 8.0
+"""Timeout individual por chamada de modelo (em segundos) para caber no teto global de 20s."""
 
 
 def _eh_erro_rede_ou_timeout(exc: BaseException | None) -> bool:
