@@ -11,6 +11,8 @@ cp .env.example .env              # opcional: os valores vazios usam os padrões
 docker compose up -d              # sobe o Postgres 17 com pgvector (volume `pgdata`)
 uv run python scripts/init_db.py  # cria o schema vazio (idempotente)
 uv run python scripts/etl.py      # insere os dados nas tabelas correspondentes (idempotente)
+uv run python scripts/etl.py      # executa o ETL completo, populando as tabelas 
+uv run python scripts/ingest_docs.py # ingere documentos, gera embeddings, completa as tabelas
 ```
 
 - `uv run python scripts/init_db.py --reset` apaga as tabelas do projeto e recria o schema do zero.
