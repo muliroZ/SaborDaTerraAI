@@ -11,6 +11,7 @@ from sabor.tools.consultar_dados import (
 )
 from sabor.tools.documentos import buscar_documentos
 from sabor.tools.resumir_produtor import resumir_produtor
+from sabor.tools.rascunhar_notificacao import rascunhar_notificacao
 
 __all__ = [
     'buscar_documentos',
@@ -21,4 +22,5 @@ __all__ = [
     'extrair_e_classificar_pedido',
     'rastrear_lote',
     'resumir_produtor',
+    'rascunhar_notificacao'
 ]
