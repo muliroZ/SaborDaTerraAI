@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import fields
 import logging
+import os
 import threading
 
 import psycopg
@@ -411,7 +412,7 @@ def main() -> None:
         on_submit=enviar,
         disabled=estado.processando,
         submit_mode='disable',
-        max_chars=4000,
+        max_chars=int(os.getenv("GUARDRAIL_MAX_CHARS", "750")),
     )
 
     if estado.pendente:

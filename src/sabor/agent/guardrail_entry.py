@@ -1,3 +1,9 @@
+"""Guardrail de entrada determinístico para o agente da Cooperativa Sabor da Terra.
+Valida escopo, tamanho, prompt injection, extração de diretrizes, links e gibberish.
+"""
+
+from __future__ import annotations
+
 import hashlib
 import os
 import re
@@ -16,12 +22,19 @@ MENSAGEM_ESCOPO_AMIGAVEL = (
 )
 
 PADROES_INJECTION = [
+    # Tentativas clássicas de override de regras
     r"ignore\s+(todas\s+)?(as\s+)?instru[çc][õo]es",
-    r"esque[çc]a\s+(tudo|as\s+regras|o\s+prompt)",
+    r"esque[çc]a\s+(tudo|as\s+regras|o\s+prompt|suas\s+diretrizes)",
     r"aja\s+como\s+(um|uma)\s+(?!assistente|operador)",
     r"system\s*prompt",
     r"modo\s+desenvolvedor",
     r"jailbreak",
+    # Tentativas de extração de diretrizes e restrições internas (como o teste relatado)
+    r"responda\s+com\s+apenas.*sim.*n[ãa]o",
+    r"voc[êe]\s+tem\s+restri[çc][õo]es\s+de\s+conte[úu]do",
+    r"quais\s+s[ãa]o\s+as\s+suas\s+instru[çc][õo]es\s+internas",
+    r"liste\s+as\s+(suas\s+)?restri[çc][õo]es",
+    r"mostre\s+seu\s+system\s+prompt",
 ]
 
 TERMOS_FORA_ESCOPO = [
@@ -33,17 +46,33 @@ TERMOS_FORA_ESCOPO = [
     r"\bhor[óo]scopo\b|\bprevis[ãa]o\s+do\s+tempo\b",
 ]
 
+# Regex para detectar URLs e links externos
+REGEX_URL = re.compile(
+    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)",
+    re.IGNORECASE,
+)
+
 MENSAGEM_ORCAMENTO_TURNO = (
     "Aviso operacional: esta solicitação atingiu o limite de chamadas ou tokens "
     "permitido para um único turno. Por favor, reformule ou divida a pergunta."
 )
 
+
 def obter_limites_configurados() -> dict[str, int]:
+    def _parse_env(var_name: str, default_val: str) -> int:
+        val = os.getenv(var_name)
+        if not val or not val.strip():
+            val = default_val
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return int(default_val)
+
     return {
-        "max_caracteres": int(os.getenv("GUARDRAIL_MAX_CHARS", "4000")),
-        "sessao_request_limit": int(os.getenv("SESSAO_REQUEST_LIMIT", "50")),
-        "turno_request_limit": int(os.getenv("TURNO_REQUEST_LIMIT", "4")),
-        "turno_tokens_limit": int(os.getenv("TURNO_TOKENS_LIMIT", "12000")),
+        "max_caracteres": _parse_env("GUARDRAIL_MAX_CHARS", "750"),
+        "sessao_request_limit": _parse_env("SESSAO_REQUEST_LIMIT", "50"),
+        "turno_request_limit": _parse_env("TURNO_REQUEST_LIMIT", "7"),
+        "turno_tokens_limit": _parse_env("TURNO_TOKENS_LIMIT", "12000"),
     }
 
 
@@ -61,8 +90,41 @@ def gerar_hash_pergunta(texto: str, dataset_version: str) -> str:
     return hashlib.sha256(chave.encode("utf-8")).hexdigest()
 
 
+def _eh_gibberish(texto: str) -> bool:
+    """Identifica mensagens compostas por caracteres aleatórios sem sentido ou spam de símbolos."""
+    texto_limpo = texto.strip()
+    if len(texto_limpo) < 4:
+        return False
+
+    # Remove espaços para avaliar densidade de letras/símbolos
+    sem_espacos = texto_limpo.replace(" ", "")
+    if len(sem_espacos) == 0:
+        return True
+
+    # 1. Proporção excessiva de caracteres especiais não alfanuméricos consecutivos
+    if re.search(r'[^a-zA-Z0-9À-ÿ\s]{4,}', texto_limpo):
+        return True
+
+    # 2. Sequências puramente randômicas sem vogais em palavras longas (ex: "asjdhfiuasdfh")
+    palavras = texto_limpo.split()
+    palavras_sem_sentido = 0
+    for p in palavras:
+        p_limpo = re.sub(r'[^a-zA-ZÀ-ÿ]', '', p)
+        if len(p_limpo) >= 6:
+            vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
+            tem_vogal = any(c.lower() in vogais for c in p_limpo)
+            if not tem_vogal:
+                palavras_sem_sentido += 1
+
+    # Se houver muitas palavras longas sem vogal, considera gibberish
+    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4 and len(palavras) <= 3:
+        return True
+
+    return False
+
+
 def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
-    """2a: Validação determinística de tamanho, injection e escopo;"""
+    """2a: Validação determinística de tamanho, links, gibberish, injection e escopo."""
     limites = obter_limites_configurados()
     max_chars = limites["max_caracteres"]
     texto_limpo = texto.strip()
@@ -73,6 +135,26 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
             mensagem=(
                 f"Sua mensagem excedeu o limite permitido ({len(texto_limpo)} caracteres; "
                 f"máximo de {max_chars}). Por favor, resuma ou envie em partes menores."
+            ),
+        )
+
+    # Bloqueio de URLs e Links externos
+    if REGEX_URL.search(texto_limpo):
+        return RetornoAntecipado(
+            motivo="FORA_DE_ESCOPO",
+            mensagem=(
+                "Links externos não são permitidos por motivos de segurança e política operacional. "
+                "Por favor, cole o texto diretamente se necessário."
+            ),
+        )
+
+    # Bloqueio de caracteres aleatórios / gibberish
+    if _eh_gibberish(texto_limpo):
+        return RetornoAntecipado(
+            motivo="FORA_DE_ESCOPO",
+            mensagem=(
+                "Não consegui identificar uma solicitação clara em sua mensagem. "
+                "Por favor, digite sua dúvida sobre pedidos, estoque ou relatórios operacionais."
             ),
         )
 
@@ -100,7 +182,7 @@ def verificar_cache_estatico(
     dataset_version: str,
     cache_repo: Optional[Any] = None,
 ) -> Optional[RetornoAntecipado]:
-    """2b: Gancho para consulta por hash no cache UNLOGGED;"""
+    """2b: Gancho para consulta por hash no cache UNLOGGED."""
     if cache_repo is None:
         return None
 
@@ -116,7 +198,7 @@ def verificar_cache_estatico(
 
 
 def verificar_cota_sessao(requisicoes_na_sessao: int) -> Optional[RetornoAntecipado]:
-    """2c: Verifica se a sessão já atingiu o teto de requisições;"""
+    """2c: Verifica se a sessão já atingiu o teto de requisições."""
     limites = obter_limites_configurados()
     if requisicoes_na_sessao >= limites["sessao_request_limit"]:
         return RetornoAntecipado(
@@ -127,6 +209,7 @@ def verificar_cota_sessao(requisicoes_na_sessao: int) -> Optional[RetornoAntecip
             ),
         )
     return None
+
 
 def criar_retorno_orcamento_turno() -> RetornoAntecipado:
     """2c: Retorno padronizado quando UsageLimitExceeded é disparado pelo PydanticAI."""
@@ -142,7 +225,7 @@ def executar_guardrail_entrada(
     requisicoes_na_sessao: int = 0,
     cache_repo: Optional[Any] = None,
 ) -> Optional[RetornoAntecipado]:
-    """Executa 2a -> 2b -> 2c em sequência. Retorna None se a entrada estiver liberada;"""
+    """Executa 2a -> 2b -> 2c em sequência. Retorna None se a entrada estiver liberada."""
     bloqueio = verificar_escopo_e_tamanho(mensagem)
     if bloqueio:
         return bloqueio
