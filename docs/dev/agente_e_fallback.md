@@ -23,7 +23,12 @@ scripts/
 
 src/sabor/
 ├── db.py                    # Adicionada role sabor_ro e função conectar_readonly()
-├── tools.py                 # Documentação e convenção snake_case para as tools do time, tools da issue #7 e #8
+├── tools/                   # Pacote modular das ferramentas read-only do agente
+│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos e resumir_produtor
+│   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
+│   ├── consultar_dados.py   # Ferramentas de consulta SQL read-only (#7)
+│   ├── documentos.py        # Ferramenta buscar_documentos com busca híbrida lexical + vetorial (#8)
+│   └── resumir_produtor.py  # Ferramenta resumir_produtor com vendas, pendências, pedidos elegíveis, alertas e rascunho (#11)
 ├── sql/
 │   └── schema.sql           # Criação idempotente da role sabor_ro (NOLOGIN, apenas SELECT)
 └── agent/
@@ -37,17 +42,18 @@ src/sabor/
 
 tests/
 ├── test_schema.py           # Testes da role sabor_ro e bloqueio de INSERT/UPDATE/DELETE/DROP
-└── agent/
-    ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
-    ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
-    ├── test_entry_guardrail.py # Testes do guardrail de entrada (20k chars, fora de escopo, injection, cota e UsageLimits)
-    ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
-    ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
-    └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
-└── tools/   
-    └── test_consulta_dados.py # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
-    └── conftest.py # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
-    └── test_buscar_documentos.py# Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
+├── agent/
+│   ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
+│   ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
+│   ├── test_entry_guardrail.py # Testes do guardrail de entrada (20k chars, fora de escopo, injection, cota e UsageLimits)
+│   ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
+│   ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
+│   └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
+└── tools/
+    ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
+    ├── test_consulta_dados.py   # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
+    ├── test_buscar_documentos.py # Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
+    └── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
 ```
 
 ---
@@ -78,19 +84,14 @@ Injetado automaticamente nas ferramentas e no prompt dinâmico via `RunContext[A
 - `texto: str` — Resposta em PT-BR para o operador interno.
 - `fontes: list[Fonte]` — Lista de citações (`arquivo` + `referencia`), formatáveis via `.formatar()` como `[arquivo · referencia]`.
 - `flags: list[Flag]` — Alertas identificados (`fora_de_safra`, `acima_capacidade`, `conformidade`, `inadimplencia`, `ambiguidade`, `privacidade`).
-- `rascunhos: list[Rascunho]` — Mensagens prontas (`destinatario`, `canal`, `conteudo`) para revisão da equipe.
+- `rascunhos: list[Rascunho]` — Mensagens prontas (`destinatario`, `conteudo` em formato padrão limpo e `canal: str | None = None`) para revisão da equipe.
 
 ### 3.3. Retorno do Turno (`RespostaTurno`)
 Consolida a `RespostaAgente` + metadados técnicos e de auditoria:
 - `sessao_id: str`, `usuario: str`
 - `texto: str`, `fontes: list[Fonte]`, `flags: list[Flag]`, `rascunhos: list[Rascunho]`
-- `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente na Etapa 2.
 - `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente por bloqueio na Etapa 2 (ou quando estoura `UsageLimits`).
 - `retorno_antecipado: RetornoAntecipado | None` — Objeto padronizado com `motivo` (`ENTRADA_VAZIA`, `TAMANHO_EXCEDIDO`, `FORA_DE_ESCOPO`, `PROMPT_INJECTION`, `CACHE_HIT`, `COTA_SESSAO_ESGOTADA`, `ORCAMENTO_TURNO_ESGOTADO`), `mensagem` e `fontes`.
-- `falha_segura: bool` — `True` quando todos os provedores LLM falham ou o turno excede o limite global de **20 segundos**.
-- `modelo_efetivo: str | None` e `provedor_efetivo: str | None` — Extraídos diretamente dos metadados reais do `ModelResponse` do PydanticAI.
-- `tentativas_fallback: list[TentativaFallback]` — Histórico detalhado de tentativas que falharam ou tiveram schema rejeitado antes da resposta final.
-- `latencia_ms: int` — Tempo total do turno em milissegundos.
 
 ---
 
@@ -154,6 +155,17 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
     - `buscar_documentos(ctx, pergunta, tipo_doc=..., produtor_id=..., apenas_vigentes=..., k=5)` — Combina similaridade vetorial (`gemini-embedding-001`, 768 dims, `RETRIEVAL_QUERY`) e busca lexical (`texto_busca @@ websearch_to_tsquery('portuguese', ...)`) via **RRF** (`k=60`), filtrando metadados antes do ranqueamento, aplicando limiar de relevância (`"sem resultado relevante"` abaixo do piso), cruzando validade documental com `ctx.deps.data_referencia` e devolvendo trechos mascarados com citação `[arquivo · seção]`.
 - **Controle de acesso e privacidade:** Todas as consultas respeitam o perfil resolvido a partir de `ctx.deps.usuario` (`funcionario` vs. `produtor` restrito ao próprio `produtor_id`, lançando `SemPermissao` em tentativas de acesso a terceiros) e mascaram campos sensíveis via `ctx.deps.mascarador.mascarar(...)`.
 ### -----------------------------------------------------------------------------------------
+
+### ✅ Issue `#11` — Resumo Operacional e Financeiro do Produtor (`src/sabor/tools/resumir_produtor.py`) — *Concluída*
+- **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
+  - `resumir_produtor(ctx, produtor)` — Aceita tanto o ID exato (`'P001'`) quanto o nome parcial/completo com ou sem acentos (`'Maria das Graças'`).
+- **O que consolida:**
+  - **Vendas e Pendências (reaproveitando `consultar_financeiro` da `#7`):** Soma vendas de setembro e outubro do ano de referência (`P001` = `R$ 1.090,00` em setembro, `R$ 0,00` em outubro, `R$ 0,00` pendente), total pendente e total vencido em relação a `ctx.deps.data_referencia`.
+  - **Pedidos em aberto elegíveis:** Lista pedidos `status = 'pendente'` que demandam produtos fornecidos pelo produtor, filtrando automaticamente por elegibilidade (pedidos orgânicos exigem certificação vigente; produtos de origem animal exigem registro SIE ativo).
+  - **Alertas documentais e sanitários:** Sinaliza certificação orgânica vencendo em até 45 dias (`P004`) ou vencida (`P008`), não conformidades/apontamentos em relatórios de inspeção da ADAGRO (`P017`) e ausência de registro SIE ou laudo sanitário para produtores de origem animal (sem gerar falso positivo para produtores vegetais).
+  - **Rascunho na resposta estruturada:** Devolve `Rascunho(destinatario=..., conteudo=...)` com texto em formatação padrão limpa, tom simples e direto, e compradores mascarados via `ctx.deps.mascarador`.
+- **Controle de acesso (RBAC):** Funcionário pode consultar qualquer produtor; perfil `produtor` só acessa o próprio resumo (tentativas de consultar terceiros disparam `SemPermissao`).
+### -----------------------------------------------------------------------------------------
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
@@ -179,7 +191,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Como funciona:**
   - `AgentDeps.mascarador` cria uma instância de `Mascarador` por turno (com mapa `token -> valor` exclusivamente em memória).
   - Substitui CPF, RG, telefone, e-mail, banco, agência, conta corrente e chave PIX por tokens (`[CPF_1]`, `[RG_1]`, `[TEL_1]`, `[EMAIL_1]`, `[BANCO_1]`, `[AGENCIA_1]`, `[CONTA_1]`, `[PIX_1]`), aceitando formatos com e sem pontuação.
-  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, e futuras `#9`, `#11`, `#12`).
+  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, `#11` e futuras `#9`, `#12`).
   - Na **Etapa 4c**, `_restaurar_pii_resposta()` restaura os tokens **exclusivamente em `resposta.texto`** (para o operador interno) e **nunca em `resposta.rascunhos`** (protegendo rascunhos destinados a terceiros conforme a LGPD).
 - **Como as futuras tools (`#9`, `#11`, `#12`) devem usar:**
   - Basta chamar `ctx.deps.mascarador.mascarar(texto)` (ou `ctx.deps.mascarador.mascarar_campo(valor, 'PIX')`) antes de devolver qualquer string com dados de produtores/compradores.

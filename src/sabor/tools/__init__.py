@@ -9,6 +9,8 @@ from sabor.tools.consultar_dados import (
     consultar_safra,
     rastrear_lote,
 )
+from sabor.tools.documentos import buscar_documentos
+from sabor.tools.resumir_produtor import resumir_produtor
 
 __all__ = [
     'buscar_documentos',
@@ -18,4 +20,5 @@ __all__ = [
     'consultar_safra',
     'extrair_e_classificar_pedido',
     'rastrear_lote',
+    'resumir_produtor',
 ]
