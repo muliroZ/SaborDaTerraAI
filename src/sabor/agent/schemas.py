@@ -2,9 +2,12 @@
 
 from collections.abc import Sequence
 
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelRequestAttempt
 
+
+UserProfile = Literal["funcionario", "produtor"]
 
 class Fonte(BaseModel):
     """Citação de fonte documental ou operacional no formato `[arquivo · referencia]`."""
@@ -66,6 +69,21 @@ class TentativaFallback(BaseModel):
             duracao_ms=int(attempt.duration.total_seconds() * 1000),
         )
 
+EarlyReturnList = Literal[
+    "ENTRADA_VAZIA",
+    "TAMANHO_EXCEDIDO",
+    "FORA_DE_ESCOPO",
+    "PROMPT_INJECTION",
+    "CACHE_HIT",
+    "COTA_SESSAO_ESGOTADA",
+    "ORCAMENTO_TURNO_ESGOTADO",
+]
+
+class RetornoAntecipado(BaseModel):
+    """Objeto padronizado para retornos antecipados da Etapa 2 (UI e auditoria)."""
+    motivo: EarlyReturnList
+    mensagem: str
+    fontes: list[Fonte] = Field(default_factory=list)
 
 class RespostaTurno(BaseModel):
     """Resultado completo de `processar_turno` para a interface (#13) e auditoria (#35)."""
@@ -77,6 +95,7 @@ class RespostaTurno(BaseModel):
     flags: list[Flag] = Field(default_factory=list)
     rascunhos: list[Rascunho] = Field(default_factory=list)
     bloqueado_guardrail: bool = False
+    retorno_antecipado: RetornoAntecipado | None = None
     falha_segura: bool = False
     modelo_efetivo: str | None = None
     provedor_efetivo: str | None = None

@@ -15,9 +15,11 @@ from pydantic_ai.exceptions import (
     FallbackExceptionGroup,
     ModelAPIError,
     UnexpectedModelBehavior,
+    UsageLimitExceeded
 )
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest
 from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
 
 from sabor import tools as modulo_tools
 from sabor.agent.deps import AgentDeps, obter_data_referencia
@@ -28,9 +30,19 @@ from sabor.agent.fallback import (
     extrair_metadados_resposta,
     extrair_tentativas_de_excecao,
 )
+from sabor.agent.guardrails import (
+    criar_retorno_orcamento_turno,
+    executar_guardrail_entrada,
+    obter_usage_limits_turno,
+)
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
-from sabor.agent.schemas import RespostaAgente, RespostaTurno, TentativaFallback
+from sabor.agent.schemas import (
+    RespostaAgente,
+    RespostaTurno,
+    RetornoAntecipado,
+    TentativaFallback,
+)
 from sabor.db import conectar_readonly
 
 TIMEOUT_TURNO_S = 20.0
@@ -135,6 +147,11 @@ def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> Respos
     return resposta.model_copy(update={'texto': texto_restaurado})
 
 
+def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
+    """Conta quantas requisições de usuário já ocorreram na sessão atual."""
+    return sum(1 for msg in historico if isinstance(msg, ModelRequest))
+
+
 def processar_turno(
     sessao_id: str,
     mensagem: str,
@@ -143,24 +160,16 @@ def processar_turno(
     agente: Agent[AgentDeps, RespostaAgente] | None = None,
     deps: AgentDeps | None = None,
     timeout_turno_s: float = TIMEOUT_TURNO_S,
+    usage_limits: UsageLimits | None = None,
+    requisicoes_na_sessao: int | None = None,
+    cache_repo: Any | None = None,
     # Hooks de integração com as demais issues do diagrama Agent System:
     carregar_memoria: Callable[[str], Sequence[ModelMessage]] | None = None,  # Etapa 1 (#31)
-    guardrail_entrada: Callable[[str], str | None] | None = None,  # Etapa 2
+    guardrail_entrada: Callable[[str], RetornoAntecipado | str | None] | None = None,  # Etapa 2
     pos_processar: Callable[[RespostaAgente], RespostaAgente] | None = None,  # Etapa 4
     registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
     salvar_memoria: Callable[[str, str, RespostaTurno], None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
-    """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados.
-
-    Fluxo:
-      1. Memória (#31): carrega o histórico da `sessao_id`.
-      2. Guardrail de entrada: valida a mensagem antes do LLM; se bloqueada, retorna antecipado.
-      3. PydanticAI (#37): monta contexto (3.1), decide/executa ferramentas read-only (3.2-3.3)
-         e gera `RespostaAgente` (3.4) sob `ModelFallback` e teto global de `timeout_turno_s` (20s).
-         Em caso de falha de todos os provedores ou estouro de tempo, retorna falha segura.
-      4. Pós-processamento (#33): restaura PII para o operador interno e aplica validações de saída.
-      5. Persistência (#35 e #31): registra auditoria (modelo/provedor efetivos) e salva memória.
-    """
     inicio = time.perf_counter()
 
     # -----------------------------------------------------------------------
@@ -174,32 +183,62 @@ def processar_turno(
     # Etapa 2: Guardrail de entrada (retorno antecipado sem chamada LLM)
     # -----------------------------------------------------------------------
     mensagem_limpa = mensagem.strip()
-    motivo_bloqueio: str | None = None
-    if not mensagem_limpa:
-        motivo_bloqueio = MENSAGEM_ENTRADA_VAZIA
-    elif guardrail_entrada is not None:
-        motivo_bloqueio = guardrail_entrada(mensagem_limpa)
+    retorno_antecipado: RetornoAntecipado | None = None
 
-    if motivo_bloqueio is not None:
+    if not mensagem_limpa:
+        retorno_antecipado = RetornoAntecipado(
+            motivo='ENTRADA_VAZIA',
+            mensagem=MENSAGEM_ENTRADA_VAZIA,
+        )
+    elif guardrail_entrada is not None:
+        resultado_hook = guardrail_entrada(mensagem_limpa)
+        if isinstance(resultado_hook, RetornoAntecipado):
+            retorno_antecipado = resultado_hook
+        elif isinstance(resultado_hook, str):
+            retorno_antecipado = RetornoAntecipado(
+                motivo='FORA_DE_ESCOPO',
+                mensagem=resultado_hook,
+            )
+    else:
+        dataset_ver = deps.dataset_version if deps is not None else 'v1'
+        contagem_sessao = (
+            requisicoes_na_sessao
+            if requisicoes_na_sessao is not None
+            else _contar_turnos_historico(historico)
+        )
+        retorno_antecipado = executar_guardrail_entrada(
+            mensagem=mensagem_limpa,
+            dataset_version=dataset_ver,
+            requisicoes_na_sessao=contagem_sessao,
+            cache_repo=cache_repo,
+        )
+
+    if retorno_antecipado is not None:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
-        turno_bloqueado = RespostaTurno(
+        eh_cache_hit = retorno_antecipado.motivo == 'CACHE_HIT'
+        turno_antecipado = RespostaTurno(
             sessao_id=sessao_id,
             usuario=usuario,
-            texto=motivo_bloqueio,
-            bloqueado_guardrail=True,
+            texto=retorno_antecipado.mensagem,
+            fontes=list(retorno_antecipado.fontes),
+            bloqueado_guardrail=not eh_cache_hit,
+            retorno_antecipado=retorno_antecipado,
             latencia_ms=latencia_ms,
         )
         if registrar_auditoria is not None:
-            registrar_auditoria(turno_bloqueado)
-        return turno_bloqueado
+            registrar_auditoria(turno_antecipado)
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
+        return turno_antecipado
 
     # -----------------------------------------------------------------------
-    # Etapa 3: Execução do Agente PydanticAI + ModelFallback + Falha Segura (#37)
+    # Etapa 3: Execução do Agente PydanticAI + UsageLimits (2c) + Fallback (#37)
     # -----------------------------------------------------------------------
     agente_exec = agente if agente is not None else criar_agente()
     gerenciador_conn = (
         nullcontext(deps.conn) if deps is not None else conectar_readonly()
     )
+    limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
 
     tentativas_erro: list[TentativaFallback] = []
     try:
@@ -228,12 +267,29 @@ def processar_turno(
                     deps=deps_exec,
                     message_history=historico,
                     model_settings=settings_turno,
+                    usage_limits=limites_exec,
                 )
                 resultado = futuro.result(timeout=timeout_turno_s)
+    except UsageLimitExceeded:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        retorno_orcamento = criar_retorno_orcamento_turno()
+        turno_orcamento = RespostaTurno(
+            sessao_id=sessao_id,
+            usuario=usuario,
+            texto=retorno_orcamento.mensagem,
+            bloqueado_guardrail=True,
+            retorno_antecipado=retorno_orcamento,
+            latencia_ms=latencia_ms,
+        )
+        if registrar_auditoria is not None:
+            registrar_auditoria(turno_orcamento)
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_orcamento)
+        return turno_orcamento
     except (
         TimeoutError,
         httpx.TimeoutException,
-         httpx.TransportError,
+        httpx.TransportError,
         FallbackExceptionGroup,
         ModelAPIError,
         UnexpectedModelBehavior,
