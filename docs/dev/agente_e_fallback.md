@@ -28,9 +28,10 @@ src/sabor/
 │   └── schema.sql           # Criação idempotente da role sabor_ro (NOLOGIN, apenas SELECT)
 └── agent/
     ├── __init__.py          # Ponto de entrada enxuto (AgentDeps, RespostaAgente, RespostaTurno, criar_agente, processar_turno)
-    ├── schemas.py           # Modelos Pydantic: Fonte, Flag, Rascunho, RespostaAgente, TentativaFallback, RespostaTurno
+    ├── schemas.py           # Modelos Pydantic: Fonte, Flag, Rascunho, RespostaAgente, TentativaFallback, RespostaTurno, RetornoAntecipado
     ├── deps.py              # Contexto injetado: AgentDeps, obter_data_referencia() e MascaradorNoOp
     ├── fallback.py          # Cadeia ModelFallback (Gemini -> Qwen3 -> Mistral), gatilhos e metadados reais (#37)
+    ├── guardrails.py        # Guardrail de entrada determinístico: escopo, tamanho, prompt injection, cache hook e limites (Etapa 2)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)
     └── runner.py            # Fábrica criar_agente(), descoberta dinâmica de tools e processar_turno() (Etapas 1 a 5)
 
@@ -39,9 +40,10 @@ tests/
 └── agent/
     ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
     ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
+    ├── test_entry_guardrail.py # Testes do guardrail de entrada (20k chars, fora de escopo, injection, cota e UsageLimits)
     ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
     ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
-    └── test_runner.py      # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
+    └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
 └── tools/   
     └── test_consulta_dados.py # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     └── conftest.py # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
@@ -83,6 +85,8 @@ Consolida a `RespostaAgente` + metadados técnicos e de auditoria:
 - `sessao_id: str`, `usuario: str`
 - `texto: str`, `fontes: list[Fonte]`, `flags: list[Flag]`, `rascunhos: list[Rascunho]`
 - `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente na Etapa 2.
+- `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente por bloqueio na Etapa 2 (ou quando estoura `UsageLimits`).
+- `retorno_antecipado: RetornoAntecipado | None` — Objeto padronizado com `motivo` (`ENTRADA_VAZIA`, `TAMANHO_EXCEDIDO`, `FORA_DE_ESCOPO`, `PROMPT_INJECTION`, `CACHE_HIT`, `COTA_SESSAO_ESGOTADA`, `ORCAMENTO_TURNO_ESGOTADO`), `mensagem` e `fontes`.
 - `falha_segura: bool` — `True` quando todos os provedores LLM falham ou o turno excede o limite global de **20 segundos**.
 - `modelo_efetivo: str | None` e `provedor_efetivo: str | None` — Extraídos diretamente dos metadados reais do `ModelResponse` do PydanticAI.
 - `tentativas_fallback: list[TentativaFallback]` — Histórico detalhado de tentativas que falharam ou tiveram schema rejeitado antes da resposta final.
@@ -159,10 +163,14 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 
 ---
 
-### 🛡️ Guardrail de Entrada (Etapa 2) e Pós-Processamento / Guardrail de Saída (Etapa 4)
-- **Pontos de conexão no `processar_turno` ([`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py)):**
-  1. **Etapa 2 (`guardrail_entrada`):** Atualmente já bloqueia mensagens vazias. Quando o guardrail de escopo/tamanho/cota for implementado, basta plugar a função `(mensagem: str) -> str | None` (retorna `None` se válida, ou a string de motivo do bloqueio para retorno antecipado com `bloqueado_guardrail=True`).
-  2. **Etapa 4 (`pos_processar`):** Hook `(RespostaAgente) -> RespostaAgente` chamado logo após a restauração de PII para aplicar travas determinísticas de saída (ex.: bloqueios obrigatórios de `P017` e `P008`).
+### ✅ Guardrail de Entrada (Etapa 2) — *Concluída* e 🛡️ Guardrail de Saída (Etapa 4)
+- **Onde está implementado (Etapa 2):** [`src/sabor/agent/guardrails.py`](../../src/sabor/agent/guardrails.py), integrado em [`runner.py`](../../src/sabor/agent/runner.py) e [`schemas.py`](../../src/sabor/agent/schemas.py).
+- **Como funciona a Etapa 2:**
+  1. **2a (Escopo, Tamanho e Prompt Injection):** Bloqueia deterministicamente mensagens vazias, acima do limite (`GUARDRAIL_MAX_CHARS`, padrão `4000`), assuntos fora do domínio da cooperativa e tentativas de *prompt injection* sem consumir tokens do LLM (`modelo_efetivo=None`).
+  2. **2b (Gancho de Cache Estático — `#36`):** Gera o hash SHA-256 normalizado (`dataset_version + pergunta`) e consulta `cache_repo.buscar_por_hash(...)` quando injetado em `processar_turno(..., cache_repo=...)`, devolvendo `RetornoAntecipado(motivo="CACHE_HIT")` com `bloqueado_guardrail=False`.
+  3. **2c (Orçamento de Turno e Cota por Sessão):** Verifica o limite de requisições por sessão (`SESSAO_REQUEST_LIMIT`, padrão `50`) antes do LLM e injeta `UsageLimits(request_limit=..., total_tokens_limit=...)` no `agente.run_sync`. Caso ocorra `UsageLimitExceeded`, captura a exceção sem *stack trace* na UI e devolve `RetornoAntecipado(motivo="ORCAMENTO_TURNO_ESGOTADO")` sem afetar o turno seguinte.
+  4. **Pós-processamento garantido:** Todos os retornos antecipados passam pelos hooks de auditoria (`#35`) e memória (`#31`).
+- **O que falta para a Etapa 4 (`pos_processar`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII para aplicar travas determinísticas de saída (ex.: bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
 
 ---
 
