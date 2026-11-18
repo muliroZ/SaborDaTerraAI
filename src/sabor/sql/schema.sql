@@ -353,6 +353,25 @@ CREATE TABLE IF NOT EXISTS mensagens (
     criada_em  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Auditoria #35 mantém 0..N registros por sessão. ON DELETE SET NULL preserva a
+-- auditoria mesmo que uma sessão seja removida; o tipo text segue o contrato vigente.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'auditoria_mensagens_sessao_id_fkey'
+          AND conrelid = 'auditoria_mensagens'::regclass
+    ) THEN
+        ALTER TABLE auditoria_mensagens
+            ADD CONSTRAINT auditoria_mensagens_sessao_id_fkey
+            FOREIGN KEY (sessao_id) REFERENCES sessoes (id) ON DELETE SET NULL NOT VALID;
+    END IF;
+END
+$$;
+
+COMMENT ON COLUMN auditoria_mensagens.sessao_id IS
+    'Sessão associada (0..N auditorias por sessão); NULL quando sem sessão ou removida.';
+
 COMMENT ON COLUMN mensagens.conteudo IS
     'Usuário: {"texto": ...}. Assistente: RespostaTurno serializado (texto, fontes, flags, '
     'rascunhos, retorno antecipado, modelo e latência).';

@@ -186,11 +186,11 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
-> **Camada mínima já entregue com a `#13`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens` (`sessao_id` em `text`, como em `auditoria_mensagens`), `obter_ou_criar_sessao_ativa`, `registrar_turno` (5b, inclusive retorno antecipado e falha segura), `carregar_historico` (1, últimos `MEMORIA_MAX_TURNOS` turnos, padrão 6, só pergunta/resposta, PII mascarada, sem turnos barrados pelo guardrail) e `nova_sessao`. O agente passou a usar `instructions` em vez de `system_prompt`, porque o PydanticAI não reenvia o system prompt quando há `message_history`. Falta para fechar a `#31`: versão do dataset como hash da carga e alinhar a cardinalidade com a auditoria (`#35`).
+> **Implementação da `#31`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens`, `obter_ou_criar_sessao_ativa`, gravação de todos os desfechos do turno, histórico completo serializado com `new_messages_json()` e restaurado por `ModelMessagesTypeAdapter`, limitado por `MEMORIA_MAX_TURNOS` (padrão 6). Turnos barrados/falhas ficam no relatório, mas não voltam ao prompt. Sem `DATASET_VERSION`, o runner calcula um SHA-256 do conteúdo operacional/documental no PostgreSQL para versionar o cache. `auditoria_mensagens.sessao_id` referencia `sessoes.id` com `ON DELETE SET NULL`, relação de 0..N auditorias por sessão.
+>
+> **Decisão de contrato:** `sessoes.id` e as FKs permanecem `text`, com UUID gerado por padrão. Isso conserva compatibilidade com `processar_turno(sessao_id: str)`, testes/integrações legadas e auditoria; o requisito literal de tipo `uuid` da #31 fica como desvio documentado a aprovar, pois migrar exige converter IDs legados e coordenar a #35.
 
-- **Pontos de conexão no `processar_turno` ([`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py)):**
-  1. **Etapa 1 (`carregar_memoria`):** Passar (ou conectar como padrão) uma função `(sessao_id: str) -> Sequence[ModelMessage]` que busca os últimos N turnos da sessão no banco.
-  2. **Etapa 5b (`salvar_memoria`):** Passar (ou conectar como padrão) uma função `(sessao_id: str, mensagem_usuario: str, turno: RespostaTurno) -> None` que grava a pergunta e a resposta na tabela de sessão usando conexão de escrita (`conectar()`).
+- **Pontos de integração:** a interface injeta `carregar_memoria` e `salvar_memoria` no `processar_turno`; o callback de gravação aceita também `historico_modelo_json` para persistir a sequência completa produzida pelo PydanticAI. Registros antigos seguem sendo reconstruídos como pares simples de pergunta/resposta.
 
 ---
 

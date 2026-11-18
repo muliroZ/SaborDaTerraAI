@@ -23,7 +23,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from sabor import tools as modulo_tools
-from sabor.agent.deps import AgentDeps, obter_data_referencia
+from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
 from sabor.agent.fallback import (
     construir_capability_fallback,
     extrair_metadados_resposta,
@@ -259,10 +259,30 @@ def processar_turno(
     guardrail_entrada: Callable[[str], RetornoAntecipado | str | None] | None = None,  # Etapa 2
     pos_processar: Callable[[RespostaAgente], RespostaAgente] | None = None,  # Etapa 4
     registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
-    salvar_memoria: Callable[[str, str, RespostaTurno], None] | None = None,  # Etapa 5b (#31)
+    salvar_memoria: Callable[..., None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
     """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados."""
     inicio = time.perf_counter()
+
+    def _salvar_turno(turno: RespostaTurno, historico_modelo_json: str | None = None) -> None:
+        if salvar_memoria is None:
+            return
+        try:
+            assinatura = inspect.signature(salvar_memoria)
+            aceita_historico = (
+                'historico_modelo_json' in assinatura.parameters
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD
+                       for p in assinatura.parameters.values())
+            )
+        except (TypeError, ValueError):
+            aceita_historico = False
+        if aceita_historico:
+            salvar_memoria(
+                sessao_id, mensagem.strip(), turno,
+                historico_modelo_json=historico_modelo_json,
+            )
+        else:
+            salvar_memoria(sessao_id, mensagem.strip(), turno)
 
     # -----------------------------------------------------------------------
     # Etapa 1: Carregar memória da sessão (Issue #31)
@@ -292,7 +312,7 @@ def processar_turno(
                 mensagem=resultado_hook,
             )
     else:
-        dataset_ver = deps.dataset_version if deps is not None else 'v1'
+        dataset_ver = (deps.dataset_version if deps is not None else None) or 'v1'
         contagem_sessao = (
             requisicoes_na_sessao
             if requisicoes_na_sessao is not None
@@ -319,8 +339,7 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_antecipado)
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
+        _salvar_turno(turno_antecipado)
         return turno_antecipado
 
     # -----------------------------------------------------------------------
@@ -329,29 +348,27 @@ def processar_turno(
     agente_exec = agente if agente is not None else criar_agente()
     prazo_turno_s = timeout_turno_s if timeout_turno_s is not None else obter_timeout_turno()
     limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
-    # Conexão aberta pelo turno: fechada por `_executar_com_prazo` quando a execução termina.
-    # Com `deps` do chamador, a conexão é dele.
+    # Não consulta o banco para entradas vazias/barradas. Nas mensagens aceitas, calcula o
+    # fingerprint uma vez e reutiliza a conexão readonly durante a chamada do agente.
     conn_propria = conectar_readonly() if deps is None else None
-
     try:
-        deps_exec = (
-            deps
-            if deps is not None
-            else AgentDeps(
-                conn=conn_propria,
-                data_referencia=obter_data_referencia(),
-                usuario=usuario,
-                mascarador=Mascarador(),
-            )
+        deps_exec = deps or AgentDeps(
+            conn=conn_propria,
+            data_referencia=obter_data_referencia(),
+            usuario=usuario,
+            dataset_version=obter_versao_dataset(conn_propria),
+            mascarador=Mascarador(),
         )
-        mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
-        mensagem_para_llm = (
-            mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
-        )
+        if deps is not None and not deps.dataset_version:
+            deps_exec.dataset_version = obter_versao_dataset(deps.conn)
     except BaseException:
         if conn_propria is not None:
             _fechar_quando_livre(conn_propria)
         raise
+    mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+    mensagem_para_llm = (
+        mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
+    )
 
     tentativas_erro: list[TentativaFallback] = []
     try:
@@ -379,8 +396,7 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_orcamento)
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_orcamento)
+        _salvar_turno(turno_orcamento)
         return turno_orcamento
     except (
         TimeoutError,
@@ -404,8 +420,7 @@ def processar_turno(
             registrar_auditoria(turno_falha)
         # Grava também a falha segura para o histórico exibido ficar coerente; a memória
         # (#31) não a repassa ao modelo nos turnos seguintes.
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_falha)
+        _salvar_turno(turno_falha)
         return turno_falha
 
     # -----------------------------------------------------------------------
@@ -434,7 +449,13 @@ def processar_turno(
 
     if registrar_auditoria is not None:
         registrar_auditoria(turno)
-    if salvar_memoria is not None:
-        salvar_memoria(sessao_id, mensagem_limpa, turno)
+    historico_modelo_json = resultado.new_messages_json()
+    if isinstance(historico_modelo_json, bytes):
+        historico_modelo_json = historico_modelo_json.decode('utf-8')
+    if callable(mascarar_fn):
+        # A serialização contém prompts e resultados de tools; aplique a mesma proteção
+        # antes de persistir o histórico completo no banco.
+        historico_modelo_json = mascarar_fn(historico_modelo_json)
+    _salvar_turno(turno, historico_modelo_json)
 
     return turno

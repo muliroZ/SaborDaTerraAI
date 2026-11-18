@@ -137,10 +137,13 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
         with conexao() as conn:
             return sess.carregar_historico(conn, sid, max_turnos)
 
-    def salvar_memoria(sid: str, msg: str, turno: RespostaTurno) -> None:  # Etapa 5b
+    def salvar_memoria(
+        sid: str, msg: str, turno: RespostaTurno,
+        historico_modelo_json: str | None = None,
+    ) -> None:  # Etapa 5b
         nonlocal gravado
         with conexao() as conn:
-            sess.registrar_turno(conn, sid, msg, turno)
+            sess.registrar_turno(conn, sid, msg, turno, historico_modelo_json)
         gravado = True
 
     try:
@@ -309,7 +312,7 @@ def render_sidebar_sessao(sessao: sess.Sessao, processando: bool) -> None:
 
         st.divider()
         st.markdown(f'**Data de referência:** {obter_data_referencia():%d/%m/%Y}')
-        versao = DATASET_VERSION
+        versao = DATASET_VERSION or 'SHA-256 da carga'
         if status and status['assinatura']:
             versao += f' · docs {status["assinatura"]}'
         st.markdown(f'**Dataset:** `{versao}`')
