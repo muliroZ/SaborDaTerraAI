@@ -15,15 +15,20 @@ from pydantic_ai import RunContext
 from sabor.agent.deps import AgentDeps
 from sabor.tools.base import (
     _MESES,
-    TABELA_PRECOS_REFERENCIA_PADRAO,
     Fonte,
     SemPermissao,
     Usuario,
     _aplicar_filtro_produtor,
+    Mascarador,
     _mascarar_opcional,
     _mascarar_pix,
     _resolver_produto_id,
     _resolver_usuario,
+)
+
+_MESES_NOME = (
+    'janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho',
+    'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
 )
 
 # =============================================================================
@@ -162,14 +167,14 @@ def buscar_produtores(
                 validade_certificacao=validade,
                 registro_sie=sie,
                 dap_caf=dap,
-                cpf=_mascarar_opcional(mascarador, cpf),
-                telefone=_mascarar_opcional(mascarador, telefone),
-                email=_mascarar_opcional(mascarador, email),
+                cpf=_mascarar_opcional(mascarador, cpf, 'CPF'),
+                telefone=_mascarar_opcional(mascarador, telefone, 'TEL'),
+                email=_mascarar_opcional(mascarador, email, 'EMAIL'),
                 chave_pix=_mascarar_pix(mascarador, pix),
-                banco=_mascarar_opcional(mascarador, banco),
-                agencia=_mascarar_opcional(mascarador, agencia),
-                conta_corrente=_mascarar_opcional(mascarador, conta),
-                fonte=Fonte(arquivo='produtores.csv', registro=pid),
+                banco=_mascarar_opcional(mascarador, banco, 'BANCO'),
+                agencia=_mascarar_opcional(mascarador, agencia, 'AGENCIA'),
+                conta_corrente=_mascarar_opcional(mascarador, conta, 'CONTA'),
+                fonte=Fonte(arquivo='produtores.csv', referencia=pid),
             )
         )
     return resultado
@@ -301,7 +306,7 @@ def consultar_financeiro(
                 data_pagamento=pago_em,
                 alerta_divergencia=bool(divergencia),
                 chave_pix_deposito=_mascarar_pix(mascarador, pix_dep),
-                fonte=Fonte(arquivo='financeiro.csv', registro=idt),
+                fonte=Fonte(arquivo='financeiro.csv', referencia=idt),
             )
         )
 
@@ -360,6 +365,7 @@ def rastrear_lote(
     """Rastreia lote por ID exato (LOT-2026-0089) ou aproximado (ex.: 'lote 2024-089')."""
     conn = ctx.deps.conn
     usuario = _resolver_usuario(ctx.deps.usuario)
+    mascarador = ctx.deps.mascarador
 
     if not lote_id and not texto:
         raise ValueError('Informe lote_id ou texto.')
@@ -372,7 +378,9 @@ def rastrear_lote(
             'SELECT lote_id FROM lotes WHERE lote_id = %s', (candidato_exato,)
         ).fetchone()
         if linha:
-            return _montar_resultado_lote(conn, usuario, linha[0])
+            return _montar_resultado_lote(
+                conn, usuario, linha[0], mascarador=mascarador
+            )
 
     match = _PADRAO_NUMERO.search(bruto)
     if not match:
@@ -392,6 +400,7 @@ def rastrear_lote(
             conn,
             usuario,
             candidatos[0],
+            mascarador=mascarador,
             confirmar=True,
             texto_original=bruto,
         )
@@ -412,6 +421,7 @@ def _montar_resultado_lote(
     usuario: Usuario,
     lote_id: str,
     *,
+    mascarador: Mascarador,
     confirmar: bool = False,
     texto_original: str = '',
 ) -> RastrearLoteResultado:
@@ -463,9 +473,9 @@ def _montar_resultado_lote(
         refrigerado=refrig,
         temperatura_transporte_c=float(temp) if temp is not None else None,
         validade=validade,
-        inspecao_visual=insp,
+        inspecao_visual=_mascarar_opcional(mascarador, insp),
         transacao_id=transacao_id,
-        fonte=Fonte(arquivo='lotes.csv', registro=lid),
+        fonte=Fonte(arquivo='lotes.csv', referencia=lid),
     )
     mensagem = (
         f"'{texto_original}' não bate exato com um ID; confirmando: você quis dizer {lid}?"
@@ -504,7 +514,6 @@ def consultar_preco(
     *,
     organico: bool | None = None,
     quantidade: float | None = None,
-    referencia: date = TABELA_PRECOS_REFERENCIA_PADRAO,
 ) -> PrecoResultado | None:
     """Consulta preço vigente (convencional ou orgânico) e regra de desconto de atacado."""
     conn = ctx.deps.conn
@@ -515,16 +524,18 @@ def consultar_preco(
     linha = conn.execute(
         """
         SELECT produto, unidade, preco_convencional, preco_organico,
-               desconto_atacado_pct, volume_minimo_atacado, observacao
+               desconto_atacado_pct, volume_minimo_atacado, observacao, referencia
         FROM precos
-        WHERE produto_id = %s AND referencia = %s
+        WHERE produto_id = %s AND referencia <= %s
+        ORDER BY referencia DESC
+        LIMIT 1
         """,
-        (produto_id, referencia),
+        (produto_id, ctx.deps.data_referencia),
     ).fetchone()
     if linha is None:
         return None
 
-    nome, unidade, p_conv, p_org, desc_pct, vol_min, obs = linha
+    nome, unidade, p_conv, p_org, desc_pct, vol_min, obs, referencia_tabela = linha
     usar_organico = bool(organico) and p_org is not None
     base = p_org if usar_organico else p_conv
 
@@ -548,8 +559,12 @@ def consultar_preco(
         faixas=faixas,
         volume_minimo_atacado=float(vol_min or 0),
         desconto_atacado_pct=float(desc_pct or 0),
-        observacao=obs,
-        fonte=Fonte(arquivo='tabela_precos_outubro_2026.csv', registro=nome),
+        observacao=_mascarar_opcional(ctx.deps.mascarador, obs),
+        fonte=Fonte(
+            arquivo=f'tabela_precos_{_MESES_NOME[referencia_tabela.month - 1]}'
+            f'_{referencia_tabela.year}.csv',
+            referencia=nome,
+        ),
     )
 
 
@@ -607,7 +622,7 @@ def consultar_safra(
         produto=nome,
         mes=mes_num,
         nivel=nivel,
-        observacao=obs,
+        observacao=_mascarar_opcional(ctx.deps.mascarador, obs),
         produtores=produtores,
-        fonte=Fonte(arquivo='sazonalidade.csv', registro=f'{nome} · mês {mes_num}'),
+        fonte=Fonte(arquivo='sazonalidade.csv', referencia=f'{nome} · mês {mes_num}'),
     )

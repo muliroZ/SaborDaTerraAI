@@ -59,7 +59,12 @@ MENSAGEM_ENTRADA_VAZIA = 'Por favor, envie uma mensagem ou dúvida para que eu p
 
 NOMES_FERRAMENTAS_ESPERADAS = (
     'extrair_e_classificar_pedido',
-    'consultar_dados',
+    'consultar_dados',  # compatibilidade com testes e integrações legadas
+    'buscar_produtores',
+    'consultar_financeiro',
+    'rastrear_lote',
+    'consultar_preco',
+    'consultar_safra',
     'buscar_documentos',
     'resumir_produtor',
     'rascunhar_notificacao',
