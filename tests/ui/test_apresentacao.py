@@ -94,12 +94,36 @@ def conn_dados():
         conn.close()
 
 
-def test_trecho_de_registro_tabular_oculta_dados_pessoais(conn_dados):
+def test_trecho_completo_para_a_equipe_interna(conn_dados):
+    """Mesma regra do texto da resposta (etapa 4c): a equipe vê os dados pessoais."""
+    cpf = conn_dados.execute("SELECT cpf FROM produtores WHERE id = 'P001'").fetchone()[0]
     trecho = ap.buscar_trecho(
         conn_dados, Fonte(arquivo='produtores.csv', referencia='P001'), 'Dona Lúcia'
     )
     assert 'id: P001' in trecho
+    assert f'cpf: {cpf}' in trecho
+    assert 'chave_pix:' in trecho
+    assert '[CPF_' not in trecho
+    assert 'produto_id' not in trecho and 'extracao' not in trecho
+
+
+def test_trecho_oculta_dados_pessoais_para_o_perfil_produtor(conn_dados):
+    cpf = conn_dados.execute("SELECT cpf FROM produtores WHERE id = 'P001'").fetchone()[0]
+    fonte = Fonte(arquivo='produtores.csv', referencia='P001')
+    trecho = ap.buscar_trecho(conn_dados, fonte, 'P001')
+    assert 'id: P001' in trecho
+    assert cpf not in trecho
     assert 'cpf' not in trecho and 'chave_pix' not in trecho and 'conta_corrente' not in trecho
+
+
+def test_trecho_de_pedido_mascara_terceiros_so_para_produtor(conn_dados):
+    """PED-2026-015 traz o CPF de um terceiro na mensagem original."""
+    fonte = Fonte(arquivo='pedidos.json', referencia='PED-2026-015')
+    equipe = ap.buscar_trecho(conn_dados, fonte, 'Seu Antônio')
+    produtor = ap.buscar_trecho(conn_dados, fonte, 'P001')
+    assert equipe is not None and produtor is not None
+    assert '[CPF_' not in equipe
+    assert '[CPF_' in produtor
 
 
 def test_trecho_respeita_perfil_produtor(conn_dados):
