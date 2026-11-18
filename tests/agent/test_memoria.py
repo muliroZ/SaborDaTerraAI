@@ -159,3 +159,24 @@ def test_sessoes_isoladas_por_usuario(conn_temporaria):
     a = sess.obter_ou_criar_sessao_ativa(conn_temporaria, 'P002')
     b = sess.obter_ou_criar_sessao_ativa(conn_temporaria, 'P003')
     assert a.id != b.id
+
+
+def test_sessao_id_aceita_qualquer_texto_como_a_auditoria(conn_temporaria):
+    gerada = sess.criar_sessao(conn_temporaria, 'P009')
+    assert len(gerada.id) == 36  # UUID em texto por padrão
+
+    livre = sess.criar_sessao(conn_temporaria, 'P009', sessao_id='sessao-01')
+    sess.registrar_turno(conn_temporaria, 'sessao-01', 'oi', _turno('olá'))
+    assert livre.id == 'sessao-01'
+    assert sess.contar_turnos(conn_temporaria, 'sessao-01') == 1
+    assert sess.obter_sessao(conn_temporaria, 'nao-existe') is None
+
+    tipos = dict(
+        conn_temporaria.execute(
+            "SELECT table_name || '.' || column_name, data_type FROM information_schema.columns "
+            "WHERE column_name IN ('id', 'sessao_id') "
+            "AND table_name IN ('sessoes', 'mensagens', 'auditoria_mensagens')"
+        ).fetchall()
+    )
+    assert tipos['sessoes.id'] == tipos['mensagens.sessao_id'] == 'text'
+    assert tipos['auditoria_mensagens.sessao_id'] == 'text'
