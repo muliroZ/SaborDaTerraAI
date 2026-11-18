@@ -22,7 +22,12 @@ scripts/
 ├── ingest_docs.py  #Dados dos txt. para o banco (embeddings)
 
 src/sabor/
+├── __init__.py              # `uv run sabor` abre a interface Streamlit
 ├── db.py                    # Adicionada role sabor_ro e função conectar_readonly()
+├── ui/                      # Interface Streamlit (#13)
+│   ├── app.py               # App: chat, trava de turno, seletor de usuário, fontes, flags, rascunhos e nova sessão
+│   ├── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
+│   └── relatorio.py         # Relatório Markdown somente leitura da conversa, sem LLM (#38)
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
 │   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos e resumir_produtor
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
@@ -38,16 +43,23 @@ src/sabor/
     ├── fallback.py          # Cadeia ModelFallback (Gemini -> Qwen3 -> Mistral), gatilhos e metadados reais (#37)
     ├── guardrails.py        # Guardrail de entrada determinístico: escopo, tamanho, prompt injection, cache hook e limites (Etapa 2)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)
+    ├── memoria.py           # Sessões e mensagens no PostgreSQL + message_history da sessão (camada mínima de #31)
     └── runner.py            # Fábrica criar_agente(), descoberta dinâmica de tools e processar_turno() (Etapas 1 a 5)
 
 tests/
+├── conftest.py              # Fixture de banco temporário com schema vazio (sessões, UI e relatório)
 ├── test_schema.py           # Testes da role sabor_ro e bloqueio de INSERT/UPDATE/DELETE/DROP
+├── ui/
+│   ├── test_app.py          # Interface com AppTest e agente simulado: turno, persistência, memória, trava (#13)
+│   ├── test_apresentacao.py # Destaques de retorno antecipado, badges de flags e trecho/RBAC das fontes (#13)
+│   └── test_relatorio.py    # Relatório da conversa (#38)
 ├── agent/
 │   ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
 │   ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
 │   ├── test_entry_guardrail.py # Testes do guardrail de entrada (20k chars, fora de escopo, injection, cota e UsageLimits)
 │   ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
 │   ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
+│   ├── test_memoria.py      # Sessão ativa, memória dos últimos N turnos, isolamento por "Nova sessão" (#31)
 │   └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
 └── tools/
     ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
@@ -174,6 +186,8 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
+> **Camada mínima já entregue com a `#13`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens` (`sessao_id` em `text`, como em `auditoria_mensagens`), `obter_ou_criar_sessao_ativa`, `registrar_turno` (5b, inclusive retorno antecipado e falha segura), `carregar_historico` (1, últimos `MEMORIA_MAX_TURNOS` turnos, padrão 6, só pergunta/resposta, PII mascarada, sem turnos barrados pelo guardrail) e `nova_sessao`. O agente passou a usar `instructions` em vez de `system_prompt`, porque o PydanticAI não reenvia o system prompt quando há `message_history`. Falta para fechar a `#31`: versão do dataset como hash da carga e alinhar a cardinalidade com a auditoria (`#35`).
+
 - **Pontos de conexão no `processar_turno` ([`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py)):**
   1. **Etapa 1 (`carregar_memoria`):** Passar (ou conectar como padrão) uma função `(sessao_id: str) -> Sequence[ModelMessage]` que busca os últimos N turnos da sessão no banco.
   2. **Etapa 5b (`salvar_memoria`):** Passar (ou conectar como padrão) uma função `(sessao_id: str, mensagem_usuario: str, turno: RespostaTurno) -> None` que grava a pergunta e a resposta na tabela de sessão usando conexão de escrita (`conectar()`).
@@ -212,18 +226,13 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 💬 Issue `#13` — Interface Streamlit (Chat, Trava de Turno, Seletor de Usuário e Fontes)
-- **Como chamar o agente no Streamlit (`src/sabor/ui.py`):**
-  ```python
-  from sabor.agent import processar_turno
-
-  turno = processar_turno(
-      sessao_id=st.session_state.sessao_id,
-      mensagem=mensagem_usuario,
-      usuario=usuario_selecionado, # ex.: "Dona Lúcia" (funcionário) ou "P001" (trava no produtor P001)
-  )
-  )
-  # Exibir turno.texto, turno.fontes, turno.flags e turno.rascunhos
-  ```
+- **Status: ✅ implementada** em [`src/sabor/ui/app.py`](../../src/sabor/ui/app.py) (rodar com `uv run sabor`).
+- **Fluxo do turno:** `st.chat_input` → `executar_turno()` → `processar_turno(sessao_id, mensagem, usuario, carregar_memoria=..., salvar_memoria=..., requisicoes_na_sessao=...)` → `st.rerun()`. Os hooks das etapas 1 e 5b abrem e fecham conexões curtas: nenhuma conexão de escrita fica aberta durante a chamada ao modelo. O `processar_turno` chama `salvar_memoria` em todos os desfechos, inclusive falha segura. O histórico exibido sai sempre de `mensagens` (banco), nunca de `st.session_state`.
+- **Trava de turno:** o input e os botões ficam desabilitados enquanto o turno roda (`submit_mode='disable'` + flag `processando`) e há uma `threading.Lock` por `sessao_id` no processo, que impede dois turnos simultâneos na mesma sessão (ex.: duas abas).
+- **Seletor de usuário simulado:** `Dona Lúcia`, `Seu Antônio` (perfil funcionário) e `P001`…`P018` (perfil produtor), persistido em `?usuario=` na URL. Cada usuário tem a própria sessão ativa.
+- **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular; completo para a equipe interna, como o texto restaurado na etapa 4c, e com dados pessoais ocultos/mascarados e só os próprios registros para o perfil produtor), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
+- **Nova sessão:** diálogo com "Baixar relatório da conversa" (`ui/relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
+- **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos), status do banco e sugestões de perguntas da demo por perfil.
 
 ---
 

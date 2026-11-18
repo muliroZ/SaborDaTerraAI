@@ -5,7 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from pydantic_ai import RunContext
-from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from sabor.agent.deps import AgentDeps
@@ -74,6 +81,8 @@ def test_agente_injeta_contexto_e_aceita_ferramentas_mock():
         tools_disponiveis.extend(t.name for t in info.function_tools)
         for msg in messages:
             if isinstance(msg, ModelRequest):
+                if msg.instructions:
+                    prompts_recebidos.append(msg.instructions)
                 for part in msg.parts:
                     if isinstance(part, SystemPromptPart):
                         prompts_recebidos.append(part.content)
@@ -109,3 +118,33 @@ def test_agente_injeta_contexto_e_aceita_ferramentas_mock():
     texto_prompts = '\n'.join(prompts_recebidos)
     esperado = 'Data de referência: 2026-10-30 | Operador: Seu Antônio | Dataset: v-test'
     assert esperado in texto_prompts
+
+
+def test_regras_e_contexto_chegam_ao_modelo_mesmo_com_memoria_da_sessao():
+    """Com `message_history` (memória, #31) o PydanticAI não reenvia o `system_prompt`; as
+    regras e o contexto do turno precisam ir como `instructions` em toda requisição."""
+    instrucoes: list[str | None] = []
+
+    def fn(messages, info: AgentInfo) -> ModelResponse:
+        instrucoes.append(messages[-1].instructions)
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={'texto': 'ok', 'fontes': [], 'flags': [], 'rascunhos': []},
+                )
+            ]
+        )
+
+    agente = criar_agente([FunctionModel(fn, model_name='modelo-teste')], tools=[])
+    deps = AgentDeps(conn=MagicMock(), data_referencia=date(2026, 10, 30), usuario='P001')
+    historico = [
+        ModelRequest(parts=[UserPromptPart(content='tem queijo coalho?')]),
+        ModelResponse(parts=[TextPart(content='Sim, do P003.')]),
+    ]
+
+    agente.run_sync('e para o hotel?', deps=deps, message_history=historico)
+
+    assert instrucoes and instrucoes[-1] is not None
+    assert SYSTEM_PROMPT_BASE.strip()[:80] in instrucoes[-1]
+    assert 'Operador: P001' in instrucoes[-1]

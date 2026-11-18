@@ -325,6 +325,41 @@ CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_i
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
 
 -- ---------------------------------------------------------------------------
+-- Sessões de chat e mensagens (memória da sessão, etapas 1 e 5b — #31, #13)
+-- ---------------------------------------------------------------------------
+-- Cada sessão isola o contexto do agente: "Nova sessão" encerra a atual
+-- (`encerrada_em`) e a conversa antiga só volta como relatório somente leitura (#38).
+-- `id` é text (UUID gerado por padrão) para casar com `auditoria_mensagens.sessao_id` e
+-- com o contrato `processar_turno(sessao_id: str)`.
+
+CREATE TABLE IF NOT EXISTS sessoes (
+    id            text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    usuario_id    text NOT NULL,
+    perfil        text NOT NULL CHECK (perfil IN ('funcionario', 'produtor')),
+    criada_em     timestamptz NOT NULL DEFAULT now(),
+    encerrada_em  timestamptz
+);
+
+COMMENT ON COLUMN sessoes.usuario_id IS
+    'Usuário simulado do seletor da interface: nome do funcionário ou ID do produtor (P001…).';
+
+CREATE INDEX IF NOT EXISTS sessoes_usuario_idx ON sessoes (usuario_id, criada_em DESC);
+
+CREATE TABLE IF NOT EXISTS mensagens (
+    id         bigserial PRIMARY KEY,
+    sessao_id  text NOT NULL REFERENCES sessoes (id) ON DELETE CASCADE,
+    papel      text NOT NULL CHECK (papel IN ('usuario', 'assistente')),
+    conteudo   jsonb NOT NULL,
+    criada_em  timestamptz NOT NULL DEFAULT now()
+);
+
+COMMENT ON COLUMN mensagens.conteudo IS
+    'Usuário: {"texto": ...}. Assistente: RespostaTurno serializado (texto, fontes, flags, '
+    'rascunhos, retorno antecipado, modelo e latência).';
+
+CREATE INDEX IF NOT EXISTS mensagens_sessao_idx ON mensagens (sessao_id, id);
+
+-- ---------------------------------------------------------------------------
 -- Role somente leitura para o agente (apenas SELECT)
 -- ---------------------------------------------------------------------------
 

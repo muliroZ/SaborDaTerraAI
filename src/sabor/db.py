@@ -17,6 +17,8 @@ READONLY_ROLE = 'sabor_ro'
 
 # Ordem de remoção: dependentes antes das tabelas referenciadas.
 TABELAS = (
+    'mensagens',
+    'sessoes',
     'chunks',
     'documentos',
     'pedido_itens',

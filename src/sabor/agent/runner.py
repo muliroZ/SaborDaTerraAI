@@ -138,15 +138,18 @@ def criar_agente(
         timeout_s=timeout_s,
     )
     ferramentas_ativas = list(tools) if tools is not None else carregar_ferramentas_registradas()
+    # `instructions` (e não `system_prompt`): o PydanticAI só envia o system prompt quando o
+    # `message_history` está vazio; as instructions vão em toda requisição, inclusive nos
+    # turnos seguintes que carregam a memória da sessão (#31).
     agente: Agent[AgentDeps, RespostaAgente] = Agent(
         deps_type=AgentDeps,
         output_type=RespostaAgente,
-        system_prompt=SYSTEM_PROMPT_BASE,
+        instructions=SYSTEM_PROMPT_BASE,
         tools=ferramentas_ativas,
         retries=0,
         capabilities=[capability_fallback],
     )
-    agente.system_prompt(instrucoes_contexto_turno)
+    agente.instructions(instrucoes_contexto_turno)
     return agente
 
 
@@ -399,6 +402,10 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_falha)
+        # Grava também a falha segura para o histórico exibido ficar coerente; a memória
+        # (#31) não a repassa ao modelo nos turnos seguintes.
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_falha)
         return turno_falha
 
     # -----------------------------------------------------------------------
