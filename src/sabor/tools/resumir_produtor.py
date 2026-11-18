@@ -1,5 +1,5 @@
 """Ferramenta resumir_produtor (Etapa 3.3, Pilar 4.3 — Issue #11):
-Resumo operacional e financeiro sob demanda formatado como Rascunho para WhatsApp.
+Resumo operacional e financeiro sob demanda formatado como rascunho.
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def resumir_produtor(
         ),
     ],
 ) -> ResumoProdutorResultado:
-    """Consolida o panorama completo de um produtor e gera um rascunho para WhatsApp.
+    """Consolida o panorama completo de um produtor e gera um rascunho.
 
     QUANDO USAR:
     - Sempre que o usuário pedir um "resumo", "panorama", "situação geral",

@@ -29,10 +29,12 @@ src/sabor/
 │   ├── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
 │   └── relatorio.py         # Relatório Markdown somente leitura da conversa, sem LLM (#38)
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
-│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos e resumir_produtor
+│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido e resumir_produtor
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
 │   ├── consultar_dados.py   # Ferramentas de consulta SQL read-only (#7)
 │   ├── documentos.py        # Ferramenta buscar_documentos com busca híbrida lexical + vetorial (#8)
+│   ├── pedidos.py           # Ferramenta extrair_e_classificar_pedido: extração estruturada e validação dia × data (#9)
+│   ├── regras.py            # Motor de regras determinísticas de classificação de pedidos, urgência e elegibilidade (#10, reutilizável na #34)
 │   └── resumir_produtor.py  # Ferramenta resumir_produtor com vendas, pendências, pedidos elegíveis, alertas e rascunho (#11)
 ├── sql/
 │   └── schema.sql           # Criação idempotente da role sabor_ro (NOLOGIN, apenas SELECT)
@@ -65,6 +67,8 @@ tests/
     ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
     ├── test_consulta_dados.py   # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     ├── test_buscar_documentos.py # Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
+    ├── test_pedidos.py          # Testes da extração estruturada, mascaramento PII antes do LLM e conflito dia × data (#9)
+    ├── test_regras_pedidos.py   # Testes parametrizados das 15 mensagens contra a matriz de pedidos.md e elegibilidade PNAE/SIE (#10)
     └── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
 ```
 
@@ -173,6 +177,25 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Controle de acesso e privacidade:** Todas as consultas respeitam o perfil resolvido a partir de `ctx.deps.usuario` (`funcionario` vs. `produtor` restrito ao próprio `produtor_id`, lançando `SemPermissao` em tentativas de acesso a terceiros) e mascaram campos sensíveis via `ctx.deps.mascarador.mascarar(...)`.
 ### -----------------------------------------------------------------------------------------
 
+### ✅ Issues `#9` e `#10` — Extração Estruturada e Regras Determinísticas de Triagem de Pedidos (`src/sabor/tools/pedidos.py` e `regras.py`) — *Concluídas*
+- **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
+  - `extrair_e_classificar_pedido(ctx, *, pedido_id=None, texto=None) -> Pedido` — Recebe o ID de um pedido salvo na caixa de entrada (`PED-2026-001`…`015`) ou um texto colado diretamente no chat.
+- **Etapa 1 — Extração Estruturada e Data × Dia da Semana (`#9` — `pedidos.py`):**
+  - Mascara PII (`ctx.deps.mascarador.mascarar`) antes de enviar a mensagem ao subagente extrator (`output_type=Pedido`), ancorando datas relativas em `data_recebimento` (quando lido do banco) ou `ctx.deps.data_referencia`.
+  - Mapeia os nomes livres de produtos para o catálogo canônico via `_resolver_produto_id` e valida deterministicamente em `_validar_dia_e_data` conflitos entre data explícita e dia da semana (ex.: `PED-2026-001` e `PED-2026-002` → zera `entrega.data`, preenche `entrega.alerta` e adiciona `'data_inconsistente'`).
+- **Etapa 2 — Classificação Determinística em Python (`#10` — `regras.py`):**
+  - Executa `classificar_pedido_deterministico(pedido, conn=..., mensagem_original=..., data_referencia=..., data_global=...)` **100% em Python sobre o PostgreSQL** (sem delegar regras de negócio ao LLM e sem constantes *hardcoded* de IDs/datas):
+    - **Fora de safra (`fora_de_safra`):** Consulta `sazonalidade_mensal` no mês estimado da entrega (`nivel IN ('nenhuma', 'baixa')`).
+    - **Acima da capacidade (`acima_capacidade`):** Extrai dinamicamente a capacidade semanal dos `chunks` (`ficha` / `certificado`) e compara com o volume do item, o prazo de entrega ($\le 1$ dia exigindo $\ge 80\%$ da produção semanal ou carga concentrada $\ge 200\text{ kg}$ nos mesmos produtores) e a demanda agregada pendente na caixa de entrada.
+    - **Conformidade (`conformidade`):** Verifica no banco interdições em relatórios de `inspecao` da ADAGRO (`NC-001` no frango de `P017`), produtos de origem animal sem `registro_sie` (`P011`, `P017`) ou com SIE pendente em contrato público (`P018`), falta de `dap_caf` (`P006`, `P010`), certificação orgânica vencida ou a vencer até a data de entrega (`P008`, `P004` em jan/2027), solicitação de versão orgânica inexistente em `precos` (`preco_organico IS NULL` para banana/maracujá) e histórico de compras anteriores do cliente com produtor sem SIE.
+    - **Crédito / Inadimplência (`inadimplencia`, `credito`):** Soma faturas `status_pagamento = 'pendente'` com `data_vencimento < data_corte` na tabela `financeiro` (detectando `Rede SuperBom` e `PNAE`).
+    - **Privacidade (`privacidade`):** Sinaliza presença ou solicitação de CPF/RG, dados bancários (`IBAN`/`SWIFT`), chave PIX ou consulta de saldo financeiro pessoal.
+    - **Ambiguidade (`ambiguidade`):** Combina itens vagos/fora do catálogo (`len(candidatos) != 1` em `produtos`), conflito de data, referências temporais abertas (`"esse mês"`) e divergência entre o cargo declarado pelo signatário e o registrado no contrato do banco para o mesmo CPF.
+    - **Produtores elegíveis por item (`item.produtores_elegiveis`):** Filtra `produtor_produtos` mantendo apenas produtores ativos que atendem todas as restrições sanitárias (SIE/ADAGRO) e de certificação orgânica vigentes na data da entrega.
+    - **Urgência (`critica`, `alta`, `normal`, `baixa`):** Calculada por prazo relativo (`data_estimada - data_recebimento`) e natureza da mensagem, reproduzindo integralmente a matriz das 15 mensagens em `docs/pedidos.md`.
+  - **Reuso na Etapa 4a (`#34`):** As funções de `src/sabor/tools/regras.py` (`listar_produtores_elegiveis_item`, `verificar_inadimplencia_comprador`, `_produto_interditado_em_inspecao`) ficam disponíveis para o Guardrail de Saída.
+### -----------------------------------------------------------------------------------------
+
 ### ✅ Issue `#11` — Resumo Operacional e Financeiro do Produtor (`src/sabor/tools/resumir_produtor.py`) — *Concluída*
 - **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
   - `resumir_produtor(ctx, produtor)` — Aceita tanto o ID exato (`'P001'`) quanto o nome parcial/completo com ou sem acentos (`'Maria das Graças'`).
@@ -201,7 +224,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
   2. **2b (Gancho de Cache Estático — `#36`):** Gera o hash SHA-256 normalizado (`dataset_version + pergunta`) e consulta `cache_repo.buscar_por_hash(...)` quando injetado em `processar_turno(..., cache_repo=...)`, devolvendo `RetornoAntecipado(motivo="CACHE_HIT")` com `bloqueado_guardrail=False`.
   3. **2c (Orçamento de Turno e Cota por Sessão):** Verifica o limite de requisições por sessão (`SESSAO_REQUEST_LIMIT`, padrão `50`) antes do LLM e injeta `UsageLimits(request_limit=..., total_tokens_limit=...)` no `agente.run_sync`. Caso ocorra `UsageLimitExceeded`, captura a exceção sem *stack trace* na UI e devolve `RetornoAntecipado(motivo="ORCAMENTO_TURNO_ESGOTADO")` sem afetar o turno seguinte.
   4. **Pós-processamento garantido:** Todos os retornos antecipados passam pelos hooks de auditoria (`#35`) e memória (`#31`).
-- **O que falta para a Etapa 4 (`pos_processar`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII para aplicar travas determinísticas de saída (ex.: bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
+- **O que falta para a Etapa 4 (`pos_processar` — `#34`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII, reaproveitando `src/sabor/tools/regras.py` (`#10`) para aplicar travas determinísticas de saída (bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
 
 ---
 
@@ -210,9 +233,9 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Como funciona:**
   - `AgentDeps.mascarador` cria uma instância de `Mascarador` por turno (com mapa `token -> valor` exclusivamente em memória).
   - Substitui CPF, RG, telefone, e-mail, banco, agência, conta corrente e chave PIX por tokens (`[CPF_1]`, `[RG_1]`, `[TEL_1]`, `[EMAIL_1]`, `[BANCO_1]`, `[AGENCIA_1]`, `[CONTA_1]`, `[PIX_1]`), aceitando formatos com e sem pontuação.
-  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, `#11` e futuras `#9`, `#12`).
+  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, `#11` e futura `#12`).
   - Na **Etapa 4c**, `_restaurar_pii_resposta()` restaura os tokens **exclusivamente em `resposta.texto`** (para o operador interno) e **nunca em `resposta.rascunhos`** (protegendo rascunhos destinados a terceiros conforme a LGPD).
-- **Como as futuras tools (`#9`, `#11`, `#12`) devem usar:**
+- **Como a futura tools (`#12`) devem usar:**
   - Basta chamar `ctx.deps.mascarador.mascarar(texto)` (ou `ctx.deps.mascarador.mascarar_campo(valor, 'PIX')`) antes de devolver qualquer string com dados de produtores/compradores.
 
 ---
