@@ -1,9 +1,10 @@
 """Construção do agente único PydanticAI e orquestração de `processar_turno` (Etapas 1 a 5)."""
 
+import asyncio
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from concurrent.futures import Future, ThreadPoolExecutor
 import inspect
+import logging
 import re
 import time
 from types import ModuleType
@@ -24,11 +25,10 @@ from pydantic_ai.usage import UsageLimits
 from sabor import tools as modulo_tools
 from sabor.agent.deps import AgentDeps, obter_data_referencia
 from sabor.agent.fallback import (
-    TIMEOUT_POR_MODELO_S,
-    configuracao_padrao_modelo,
     construir_capability_fallback,
     extrair_metadados_resposta,
     extrair_tentativas_de_excecao,
+    ler_segundos_env,
 )
 from sabor.agent.guardrails import (
     criar_retorno_orcamento_turno,
@@ -45,8 +45,17 @@ from sabor.agent.schemas import (
 )
 from sabor.db import conectar_readonly
 
+logger = logging.getLogger(__name__)
+
 TIMEOUT_TURNO_S = 20.0
-"""Limite global de tempo do turno completo (em segundos) antes de acionar falha segura (#37)."""
+"""Limite global de tempo do turno completo (em segundos) antes de acionar falha segura (#37).
+
+Configurável em `TURNO_TIMEOUT_S`.
+"""
+
+FOLGA_ENCERRAMENTO_S = 1.0
+"""Quanto o turno espera, além do prazo, a execução cancelada terminar (ex.: uma tool síncrona
+em andamento) antes de devolver a falha segura sem ela (#49)."""
 
 MENSAGEM_FALHA_SEGURA = (
     'Não consegui responder agora devido a uma instabilidade temporária nos provedores de IA. '
@@ -115,9 +124,13 @@ def criar_agente(
     tools: Sequence[Callable[..., Any]] | None = None,
     gemini_api_key: str | None = None,
     openrouter_api_key: str | None = None,
-    timeout_s: float = TIMEOUT_POR_MODELO_S,
+    timeout_s: float | None = None,
 ) -> Agent[AgentDeps, RespostaAgente]:
-    """Cria e configura o agente único PydanticAI com prompt, fallback e tools disponíveis."""
+    """Cria e configura o agente único PydanticAI com prompt, fallback e tools disponíveis.
+
+    `timeout_s` é o limite de cada chamada de modelo da cadeia de fallback; `None` usa
+    `MODELO_TIMEOUT_S` do `.env` ou o padrão de `fallback.TIMEOUT_POR_MODELO_S`.
+    """
     capability_fallback = construir_capability_fallback(
         modelos,
         gemini_api_key=gemini_api_key,
@@ -147,6 +160,81 @@ def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> Respos
     return resposta.model_copy(update={'texto': texto_restaurado})
 
 
+def obter_timeout_turno() -> float:
+    """Teto do turno completo: `TURNO_TIMEOUT_S` ou `TIMEOUT_TURNO_S` (20 s, #37)."""
+    return ler_segundos_env('TURNO_TIMEOUT_S', TIMEOUT_TURNO_S)
+
+
+def _cancelar_consulta_em_andamento(conn: Any) -> None:
+    """Cancela no servidor a consulta que uma execução abandonada ainda está rodando.
+
+    `psycopg` segura `conn.lock` durante cada `execute`; lock livre = nada a cancelar.
+    """
+    lock = getattr(conn, 'lock', None)
+    if lock is not None and not lock.locked():
+        return
+    try:
+        conn.cancel_safe(timeout=2.0)
+    except Exception:
+        logger.warning('Não consegui cancelar a consulta do turno abandonado', exc_info=True)
+
+
+def _fechar_quando_livre(conn: Any) -> None:
+    """Fecha a conexão quando nenhuma consulta a estiver usando.
+
+    `Connection.close()` do psycopg não pega o lock e finaliza o `PGconn` mesmo com outra
+    thread no meio de uma consulta, o que não é seguro na libpq. Sob o lock, o fechamento
+    espera a consulta em curso; uma tool órfã que tente outra consulta depois recebe
+    "connection is closed", sem tocar no `PGconn` já finalizado.
+    """
+    lock = getattr(conn, 'lock', None)
+    try:
+        if lock is None:
+            conn.close()
+        else:
+            with lock:
+                conn.close()
+    except Exception:
+        logger.warning('Falha ao fechar a conexão do turno', exc_info=True)
+
+
+def _executar_com_prazo(
+    agente: Agent[AgentDeps, RespostaAgente],
+    mensagem: str,
+    *,
+    prazo_s: float,
+    conn_propria: Any | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Roda o agente numa thread própria e devolve o resultado em até `prazo_s` (#49).
+
+    - O prazo é aplicado dentro da thread com `asyncio.wait_for`, que cancela a requisição
+      HTTP em andamento em vez de deixá-la rodar (e seguir para o próximo modelo) no fundo.
+    - Se a execução não encerrar logo após o cancelamento (ex.: tool síncrona no meio de uma
+      consulta), o turno não a espera: levanta `TimeoutError` em `prazo_s + FOLGA_ENCERRAMENTO_S`
+      e encerra o executor sem bloquear (`shutdown(wait=False)`).
+    - Tools síncronas rodam em threads que o cancelamento do asyncio não interrompe. Por isso
+      a conexão aberta pelo turno é fechada só quando estiver livre (`_fechar_quando_livre`)
+      e, num turno abandonado, a consulta em andamento é cancelada no servidor.
+    """
+
+    async def _rodar() -> Any:
+        return await asyncio.wait_for(agente.run(mensagem, **kwargs), timeout=prazo_s)
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sabor-turno')
+    futuro: Future[Any] = executor.submit(lambda: asyncio.run(_rodar()))
+    if conn_propria is not None:
+        futuro.add_done_callback(lambda _f: _fechar_quando_livre(conn_propria))
+    try:
+        return futuro.result(timeout=prazo_s + FOLGA_ENCERRAMENTO_S)
+    except TimeoutError:
+        if conn_propria is not None:
+            _cancelar_consulta_em_andamento(conn_propria)
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
     """Conta quantas requisições de usuário já ocorreram na sessão atual."""
     return sum(1 for msg in historico if isinstance(msg, ModelRequest))
@@ -159,7 +247,7 @@ def processar_turno(
     *,
     agente: Agent[AgentDeps, RespostaAgente] | None = None,
     deps: AgentDeps | None = None,
-    timeout_turno_s: float = TIMEOUT_TURNO_S,
+    timeout_turno_s: float | None = None,
     usage_limits: UsageLimits | None = None,
     requisicoes_na_sessao: int | None = None,
     cache_repo: Any | None = None,
@@ -236,41 +324,45 @@ def processar_turno(
     # Etapa 3: Execução do Agente PydanticAI + UsageLimits (2c) + Fallback (#37)
     # -----------------------------------------------------------------------
     agente_exec = agente if agente is not None else criar_agente()
-    gerenciador_conn = (
-        nullcontext(deps.conn) if deps is not None else conectar_readonly()
-    )
+    prazo_turno_s = timeout_turno_s if timeout_turno_s is not None else obter_timeout_turno()
     limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
+    # Conexão aberta pelo turno: fechada por `_executar_com_prazo` quando a execução termina.
+    # Com `deps` do chamador, a conexão é dele.
+    conn_propria = conectar_readonly() if deps is None else None
+
+    try:
+        deps_exec = (
+            deps
+            if deps is not None
+            else AgentDeps(
+                conn=conn_propria,
+                data_referencia=obter_data_referencia(),
+                usuario=usuario,
+                mascarador=Mascarador(),
+            )
+        )
+        mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+        mensagem_para_llm = (
+            mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
+        )
+    except BaseException:
+        if conn_propria is not None:
+            _fechar_quando_livre(conn_propria)
+        raise
 
     tentativas_erro: list[TentativaFallback] = []
     try:
-        with gerenciador_conn as conn_ro:
-            deps_exec = (
-                deps
-                if deps is not None
-                else AgentDeps(
-                    conn=conn_ro,
-                    data_referencia=obter_data_referencia(),
-                    usuario=usuario,
-                    mascarador=Mascarador(),
-                )
-            )
-            mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
-            mensagem_para_llm = (
-                mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
-            )
-            settings_turno = configuracao_padrao_modelo(
-                timeout_s=min(TIMEOUT_POR_MODELO_S, timeout_turno_s)
-            )
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                futuro = executor.submit(
-                    agente_exec.run_sync,
-                    mensagem_para_llm,
-                    deps=deps_exec,
-                    message_history=historico,
-                    model_settings=settings_turno,
-                    usage_limits=limites_exec,
-                )
-                resultado = futuro.result(timeout=timeout_turno_s)
+        # O timeout de cada chamada vem dos modelos do agente (`criar_agente(timeout_s=...)`);
+        # o turno só impõe o teto global.
+        resultado = _executar_com_prazo(
+            agente_exec,
+            mensagem_para_llm,
+            prazo_s=prazo_turno_s,
+            conn_propria=conn_propria,
+            deps=deps_exec,
+            message_history=historico,
+            usage_limits=limites_exec,
+        )
     except UsageLimitExceeded:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
         retorno_orcamento = criar_retorno_orcamento_turno()

@@ -13,6 +13,7 @@ from pydantic_ai.exceptions import (
     FallbackExceptionGroup,
     ModelAPIError,
     ModelHTTPError,
+    ModelRequestTimeout,
     OutputTokenLimitExceeded,
     UnexpectedModelBehavior,
 )
@@ -40,8 +41,34 @@ MODELO_FALLBACK_1 = 'qwen/qwen3-32b'
 MODELO_FALLBACK_2 = 'mistralai/mistral-small-3.2-24b-instruct'
 """Segundo modelo de contingência via OpenRouter (ADR)."""
 
-TIMEOUT_POR_MODELO_S = 8.0
-"""Timeout individual por chamada de modelo (em segundos) para caber no teto global de 20s."""
+TIMEOUT_POR_MODELO_S = 12.0
+"""Timeout padrão por chamada de modelo, em segundos (configurável em `MODELO_TIMEOUT_S`).
+
+Em 18/11 o Gemini 3.5 Flash-Lite levou ~9 s por chamada, inclusive numa mensagem trivial,
+e o limite anterior de 8 s derrubava todo turno (#49). Com 12 s há folga para a chamada do
+primário, e o teto do turno (20 s, #37) continua valendo para o conjunto das chamadas.
+"""
+
+
+def ler_segundos_env(variavel: str, padrao: float) -> float:
+    """Lê uma duração em segundos do ambiente/.env; vazio ou ausente usa o padrão."""
+    load_dotenv()
+    bruto = (os.getenv(variavel) or '').strip()
+    if not bruto:
+        return padrao
+    try:
+        segundos = float(bruto.replace(',', '.'))
+    except ValueError:
+        mensagem = f'{variavel} deve ser um número de segundos, recebido {bruto!r}.'
+        raise ValueError(mensagem) from None
+    if segundos <= 0:
+        raise ValueError(f'{variavel} deve ser maior que zero, recebido {bruto!r}.')
+    return segundos
+
+
+def obter_timeout_por_modelo() -> float:
+    """Timeout por chamada de modelo: `MODELO_TIMEOUT_S` ou `TIMEOUT_POR_MODELO_S`."""
+    return ler_segundos_env('MODELO_TIMEOUT_S', TIMEOUT_POR_MODELO_S)
 
 
 def _eh_erro_rede_ou_timeout(exc: BaseException | None) -> bool:
@@ -61,7 +88,7 @@ def deve_fazer_fallback_excecao(exc: Exception) -> bool:
 
     Gatilhos permitidos (ADR 4.2 / #37):
       - Timeout de rede ou transporte (`TimeoutError`, `httpx.TimeoutException`,
-        `httpx.TransportError`)
+        `httpx.TransportError`) e prazo total da requisição esgotado (`ModelRequestTimeout`)
       - HTTP 429 (Rate Limit) ou HTTP 5xx (`ModelHTTPError`)
       - Falha de schema/comportamento do modelo (`UnexpectedModelBehavior`, `ValidationError`)
 
@@ -72,7 +99,7 @@ def deve_fazer_fallback_excecao(exc: Exception) -> bool:
     if isinstance(exc, ModelHTTPError):
         return exc.status_code == 429 or exc.status_code >= 500
 
-    if isinstance(exc, (UnexpectedModelBehavior, ValidationError)):
+    if isinstance(exc, (UnexpectedModelBehavior, ValidationError, ModelRequestTimeout)):
         return True
 
     if _eh_erro_rede_ou_timeout(exc):
@@ -118,16 +145,24 @@ def resposta_invalida_para_fallback(response: ModelResponse) -> bool:
     return False
 
 
-def configuracao_padrao_modelo(timeout_s: float = TIMEOUT_POR_MODELO_S) -> ModelSettings:
-    """Configurações padrão de tempo limite por chamada de modelo."""
-    return ModelSettings(timeout=timeout_s)
+def configuracao_padrao_modelo(timeout_s: float | None = None) -> ModelSettings:
+    """Configurações por chamada de modelo: prazo total e nenhuma retentativa no SDK (#49).
+
+    - `request_timeout`: prazo da requisição inteira, aplicado pelo PydanticAI a qualquer modelo.
+      O `timeout` do cliente HTTP só limita a espera entre bytes, e o OpenRouter manda bytes de
+      keep-alive enquanto processa: uma chamada ao Qwen levou ~35 s com `timeout=12`.
+    - `max_retries=0`: quem tenta de novo é a cadeia `ModelFallback` (#37), trocando de
+      provedor; o cliente OpenAI-compatível repetiria cada requisição 2 vezes.
+    """
+    segundos = timeout_s if timeout_s is not None else obter_timeout_por_modelo()
+    return ModelSettings(timeout=segundos, request_timeout=segundos, max_retries=0)
 
 
 def construir_modelos_padrao(
     *,
     gemini_api_key: str | None = None,
     openrouter_api_key: str | None = None,
-    timeout_s: float = TIMEOUT_POR_MODELO_S,
+    timeout_s: float | None = None,
 ) -> list[Model]:
     """Instancia os modelos da cadeia ADR: Gemini 3.5 Flash-Lite -> Qwen3 32B -> Mistral Small."""
     load_dotenv()
@@ -171,7 +206,7 @@ def construir_capability_fallback(
     *,
     gemini_api_key: str | None = None,
     openrouter_api_key: str | None = None,
-    timeout_s: float = TIMEOUT_POR_MODELO_S,
+    timeout_s: float | None = None,
 ) -> ModelFallback[Any]:
     """Cria a capability `ModelFallback` do PydanticAI 2.68.0 com a cadeia de modelos e gatilhos."""
     cadeia = (
