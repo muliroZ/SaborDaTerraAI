@@ -170,6 +170,7 @@ def processar_turno(
     registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
     salvar_memoria: Callable[[str, str, RespostaTurno], None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
+    """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados."""
     inicio = time.perf_counter()
 
     # -----------------------------------------------------------------------
