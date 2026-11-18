@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai.messages import ModelRequestAttempt
 
 
@@ -41,6 +42,21 @@ class Rascunho(BaseModel):
     conteudo: str = Field(description='Texto do rascunho sem dados sensíveis de terceiros')
 
 
+class Relatorio(BaseModel):
+    """Relatório Markdown gerado sob demanda no chat (#15), oferecido para download na UI.
+
+    Montado de forma determinística pela tool `gerar_relatorio` a partir das consultas
+    (`consultar_dados` e `buscar_documentos`); o LLM recebe só um resumo e não reescreve o
+    arquivo, que é anexado ao turno pelo runner.
+    """
+
+    tipo: str
+    titulo: str
+    nome_arquivo: str
+    markdown: str
+    fontes: list[Fonte] = Field(default_factory=list)
+
+
 class RespostaAgente(BaseModel):
     """Saída estruturada produzida pelo agente PydanticAI (etapa 3.4)."""
 
@@ -48,6 +64,8 @@ class RespostaAgente(BaseModel):
     fontes: list[Fonte] = Field(default_factory=list)
     flags: list[Flag] = Field(default_factory=list)
     rascunhos: list[Rascunho] = Field(default_factory=list)
+    relatorios: SkipJsonSchema[list[Relatorio]] = Field(default_factory=list)
+    """Preenchido pelo runner com os relatórios gerados pelas tools; fora do schema do LLM."""
 
 
 class TentativaFallback(BaseModel):
@@ -94,6 +112,7 @@ class RespostaTurno(BaseModel):
     fontes: list[Fonte] = Field(default_factory=list)
     flags: list[Flag] = Field(default_factory=list)
     rascunhos: list[Rascunho] = Field(default_factory=list)
+    relatorios: list[Relatorio] = Field(default_factory=list)
     bloqueado_guardrail: bool = False
     retorno_antecipado: RetornoAntecipado | None = None
     falha_segura: bool = False
@@ -121,6 +140,7 @@ class RespostaTurno(BaseModel):
             fontes=list(resposta.fontes),
             flags=list(resposta.flags),
             rascunhos=list(resposta.rascunhos),
+            relatorios=list(resposta.relatorios),
             modelo_efetivo=modelo_efetivo,
             provedor_efetivo=provedor_efetivo,
             tentativas_fallback=list(tentativas_fallback),

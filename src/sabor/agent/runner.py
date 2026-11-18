@@ -38,6 +38,7 @@ from sabor.agent.guardrails import (
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
+    Relatorio,
     RespostaAgente,
     RespostaTurno,
     RetornoAntecipado,
@@ -68,8 +69,9 @@ NOMES_FERRAMENTAS_ESPERADAS = (
     'buscar_documentos',
     'resumir_produtor',
     'rascunhar_notificacao',
+    'gerar_relatorio',
 )
-"""Nomes de referência previstos na arquitetura (#7, #8, #9, #11, #12)."""
+"""Nomes de referência previstos na arquitetura (#7, #8, #9, #11, #12, #15)."""
 
 _PADRAO_SNAKE_CASE = re.compile(r'^[a-z][a-z0-9_]*$')
 
@@ -138,6 +140,27 @@ def criar_agente(
     )
     agente.instructions(instrucoes_contexto_turno)
     return agente
+
+
+def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAgente:
+    """Etapa 4: anexa os relatórios gerados pelas tools no turno (#15).
+
+    O Markdown passa pelo mascarador como rede de segurança (o arquivo pode sair da
+    cooperativa, como o dossiê da ADAGRO) e, como os rascunhos, não tem a PII restaurada.
+    Se a mesma tool rodou mais de uma vez, fica a última versão de cada arquivo.
+    """
+    gerados = list(getattr(deps, 'relatorios', None) or [])
+    if not gerados:
+        return resposta
+    deps.relatorios.clear()
+
+    mascarar_fn = getattr(deps.mascarador, 'mascarar', None)
+    por_arquivo: dict[str, Relatorio] = {}
+    for relatorio in gerados:
+        if callable(mascarar_fn):
+            relatorio = relatorio.model_copy(update={'markdown': mascarar_fn(relatorio.markdown)})
+        por_arquivo[relatorio.nome_arquivo] = relatorio
+    return resposta.model_copy(update={'relatorios': list(por_arquivo.values())})
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
@@ -257,6 +280,8 @@ def processar_turno(
                     mascarador=Mascarador(),
                 )
             )
+            if isinstance(getattr(deps_exec, 'relatorios', None), list):
+                deps_exec.relatorios.clear()  # só anexa o que for gerado neste turno (#15)
             mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
             mensagem_para_llm = (
                 mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
@@ -315,7 +340,8 @@ def processar_turno(
     # -----------------------------------------------------------------------
     # Etapa 4: Pós-processamento e restauração de PII para o operador (#33)
     # -----------------------------------------------------------------------
-    resposta_final = _restaurar_pii_resposta(resultado.output, deps_exec.mascarador)
+    resposta_final = _anexar_relatorios(resultado.output, deps_exec)
+    resposta_final = _restaurar_pii_resposta(resposta_final, deps_exec.mascarador)
     if pos_processar is not None:
         resposta_final = pos_processar(resposta_final)
 

@@ -187,3 +187,62 @@ def test_processar_turno_falha_segura_quando_excede_timeout_global():
 
     assert turno.falha_segura is True
     assert turno.texto == MENSAGEM_FALHA_SEGURA
+
+
+def test_processar_turno_anexa_relatorios_das_tools_mascarados():
+    """#15: o relatório gerado pela tool chega ao turno sem passar pelo LLM e sem PII."""
+    from pydantic_ai import RunContext
+    from pydantic_ai.messages import ToolReturnPart
+
+    from sabor.agent.schemas import Relatorio
+
+    schemas_saida: list[dict] = []
+
+    def gerar_relatorio(ctx: RunContext[AgentDeps], tipo: str) -> dict:
+        ctx.deps.relatorios.append(
+            Relatorio(
+                tipo=tipo,
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas a receber\n\nCPF 111.222.333-44 [financeiro.csv · FIN-2026-013]',
+            )
+        )
+        return {'gerado': True, 'destaques': ['Vencido: R$ 8.690,00']}
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        schemas_saida.append(info.output_tools[0].parameters_json_schema)
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='gerar_relatorio', args={'tipo': 'contas_a_receber'})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={'texto': 'Relatório pronto para download.', 'fontes': []},
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)], tools=[gerar_relatorio]
+    )
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-rel',
+        'gera o relatório de contas a receber',
+        agente=agente,
+        deps=deps,
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.falha_segura is False
+    [relatorio] = turno.relatorios
+    assert relatorio.nome_arquivo == 'contas_a_receber_20261030.md'
+    assert '[CPF_MASCARADO]' in relatorio.markdown  # passou pelo mascarador e não foi restaurado
+    assert '111.222.333-44' not in relatorio.markdown
+    assert deps.relatorios == []  # não vaza para o próximo turno
+    assert all('relatorios' not in s.get('properties', {}) for s in schemas_saida)
