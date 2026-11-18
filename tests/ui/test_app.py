@@ -166,6 +166,44 @@ def test_trava_impede_dois_turnos_simultaneos_na_mesma_sessao(agente_falso):
     assert isinstance(trava, type(threading.Lock()))
 
 
+def _botao(at: AppTest, rotulo: str):
+    return next((b for b in at.button if b.label == rotulo), None)
+
+
+def test_caixa_de_entrada_so_para_a_equipe_e_ordenada_por_urgencia(agente_falso, conn_temporaria):
+    conn_temporaria.execute('TRUNCATE pedidos CASCADE')
+    conn_temporaria.execute(
+        """
+        INSERT INTO pedidos (id, data_recebimento, canal, mensagem_original) VALUES
+            ('PED-UI-1', '2026-10-28 09:00', 'email', 'cotação'),
+            ('PED-UI-2', '2026-10-28 10:00', 'whatsapp', 'notificação'),
+            ('PED-UI-3', '2026-10-28 11:00', 'email', 'falhou')
+        """
+    )
+    conn_temporaria.execute(
+        """
+        INSERT INTO triagem_pedidos (pedido_id, hash_entrada, status, tipo, urgencia, resultado,
+                                     sinalizacoes, erro) VALUES
+            ('PED-UI-1', repeat('a', 64), 'ok', 'cotacao', 'baixa', '{}', '{}', NULL),
+            ('PED-UI-2', repeat('b', 64), 'ok', 'notificacao_oficial', 'critica', '{}',
+             '{conformidade}', NULL),
+            ('PED-UI-3', repeat('c', 64), 'erro', NULL, NULL, NULL, '{}', 'timeout')
+        """
+    )
+
+    assert _botao(_app('P003'), 'Caixa de entrada') is None  # produtor não vê pedidos
+
+    at = _app('Dona Lúcia')
+    _botao(at, 'Caixa de entrada').click().run()
+
+    assert not at.exception
+    tabela = at.dataframe[0].value
+    assert list(tabela['pedido_id']) == ['PED-UI-2', 'PED-UI-1', 'PED-UI-3']
+    assert list(tabela['urgencia']) == ['Crítica', 'Baixa', 'erro']
+    assert [m.value for m in at.metric] == ['1', '0', '0', '1']
+    assert '1 pedido(s) sem triagem' in at.warning[0].value
+
+
 # ---------------------------------------------------------------------------
 # executar_turno direto (sem AppTest): conexões e gravação pelo hook da etapa 5b
 # ---------------------------------------------------------------------------

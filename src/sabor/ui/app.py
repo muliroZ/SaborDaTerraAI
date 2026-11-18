@@ -9,6 +9,7 @@ Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
   no processo impede dois turnos simultâneos na mesma sessão (ex.: duas abas abertas).
 - Seletor de usuário simulado (funcionários e produtores P001…P018) no lugar da autenticação.
 - "Nova sessão" oferece o relatório da conversa anterior (#38).
+- "Caixa de entrada" (só equipe) mostra a fila da triagem em lote, ordenada por urgência (#14).
 """
 
 from collections.abc import Iterator
@@ -26,6 +27,7 @@ from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.deps import obter_data_referencia
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor.agent.schemas import Fonte
+from sabor import triagem
 from sabor.db import conectar, conectar_readonly
 from sabor.ui import apresentacao as ap
 from sabor.ui.relatorio import FUSO, relatorio_da_sessao
@@ -276,6 +278,78 @@ def dialogo_relatorio(sessao_id: str) -> None:
     st.markdown(markdown)
 
 
+@st.dialog('Caixa de entrada', width='large')
+def dialogo_caixa_entrada() -> None:
+    with conectar_readonly(tentativas=1) as conn:
+        fila = triagem.listar_fila(conn)
+    triados = [f for f in fila if f['situacao'] == 'ok']
+    if not triados:
+        st.info(
+            'Nenhum pedido triado ainda. Rode `uv run python scripts/triagem_lote.py`.',
+            icon=':material/inbox:',
+        )
+        return
+
+    contagem = {u: sum(f['urgencia'] == u for f in triados) for u in triagem.URGENCIAS}
+    for coluna, (urgencia, total) in zip(st.columns(4), contagem.items()):
+        coluna.metric(ap.ROTULOS_URGENCIA[urgencia], total)
+    sem_triagem = len(fila) - len(triados)
+    if sem_triagem:
+        st.warning(
+            f'{sem_triagem} pedido(s) sem triagem (erro ou orçamento esgotado), no fim da fila: '
+            'rode o lote de novo ou trie manualmente.',
+            icon=':material/warning:',
+        )
+
+    colunas = (
+        'posicao', 'pedido_id', 'urgencia', 'tipo', 'comprador', 'data_entrega',
+        'sinalizacoes', 'itens', 'recebido_em', 'canal',
+    )  # fmt: skip
+    st.dataframe(
+        [
+            {
+                **{c: f[c] for c in colunas},
+                'urgencia': ap.ROTULOS_URGENCIA.get(f['urgencia'], f['situacao']),
+                'recebido_em': f['recebido_em'].strftime('%d/%m %H:%M'),
+            }
+            for f in fila
+        ],
+        column_order=colunas,
+        column_config={
+            'posicao': st.column_config.NumberColumn('#', width='small'),
+            'pedido_id': 'Pedido',
+            'urgencia': 'Urgência',
+            'tipo': 'Tipo',
+            'comprador': 'Comprador',
+            'data_entrega': st.column_config.DateColumn('Entrega', format='DD/MM/YYYY'),
+            'sinalizacoes': st.column_config.ListColumn('Sinalizações'),
+            'itens': st.column_config.ListColumn('Itens'),
+            'recebido_em': 'Recebido',
+            'canal': 'Canal',
+        },
+        hide_index=True,
+    )
+    esquerda, direita = st.columns(2)
+    esquerda.download_button(
+        'Baixar CSV',
+        '\ufeff' + triagem.para_csv(fila),
+        file_name='caixa_de_entrada.csv',
+        mime='text/csv',
+        icon=':material/download:',
+        on_click='ignore',
+        width='stretch',
+    )
+    direita.download_button(
+        'Baixar JSON',
+        triagem.para_json(fila),
+        file_name='caixa_de_entrada.json',
+        mime='application/json',
+        icon=':material/download:',
+        on_click='ignore',
+        width='stretch',
+    )
+
+
 def render_sidebar(processando: bool) -> str:
     """Seletor de usuário, status e sugestões. Devolve o usuário selecionado."""
     nomes = nomes_produtores()
@@ -306,6 +380,13 @@ def render_sidebar_sessao(sessao: sess.Sessao, processando: bool) -> None:
             width='stretch',
         ):
             dialogo_nova_sessao(sessao.id, sessao.usuario_id)
+        if not ap.eh_produtor(sessao.usuario_id) and st.button(
+            'Caixa de entrada',
+            icon=':material/inbox:',
+            disabled=processando,
+            width='stretch',
+        ):
+            dialogo_caixa_entrada()
 
         st.divider()
         st.markdown(f'**Data de referência:** {obter_data_referencia():%d/%m/%Y}')
