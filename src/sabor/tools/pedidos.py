@@ -11,6 +11,7 @@ from typing import Literal
 import dateparser
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sabor.agent.deps import AgentDeps
 from sabor.tools.base import _resolver_produto_id
@@ -88,10 +89,14 @@ _NOMES_DIAS = (
 )
 
 
+def modelo_extracao() -> str:
+    """Modelo usado na extração de pedidos (`SABOR_PEDIDOS_MODEL`)."""
+    return os.getenv('SABOR_PEDIDOS_MODEL', 'google:gemini-3.5-flash-lite')
+
+
 def _agente_extracao() -> Agent[None, Pedido]:
     """Cria o agente de extração com o modelo configurado para o projeto."""
-    modelo = os.getenv('SABOR_PEDIDOS_MODEL', 'google:gemini-3.5-flash-lite')
-    return Agent(modelo, output_type=Pedido, deps_type=None)
+    return Agent(modelo_extracao(), output_type=Pedido, deps_type=None)
 
 
 def _normalizar(texto: str) -> str:
@@ -174,6 +179,22 @@ async def extrair_e_classificar_pedido(
     texto: str | None = None,
 ) -> Pedido:
     """Extrai dados de um pedido salvo ou de texto colado."""
+    return await extrair_e_classificar(ctx.deps, pedido_id=pedido_id, texto=texto)
+
+
+async def extrair_e_classificar(
+    deps: AgentDeps,
+    *,
+    pedido_id: str | None = None,
+    texto: str | None = None,
+    usage: RunUsage | None = None,
+    usage_limits: UsageLimits | None = None,
+) -> Pedido:
+    """Núcleo da tool, chamável fora do turno (triagem em lote, #14).
+
+    `usage` acumula o consumo da chamada ao modelo e `usage_limits` aplica o orçamento
+    de tokens (#32); sem eles, a chamada é a mesma do chat.
+    """
     if bool(pedido_id) == bool(texto):
         raise ValueError('Informe exatamente um entre pedido_id e texto.')
 
@@ -181,7 +202,7 @@ async def extrair_e_classificar_pedido(
     id_resolvido: str | None = None
 
     if pedido_id:
-        row = ctx.deps.conn.execute(
+        row = deps.conn.execute(
             """
             SELECT id, data_recebimento, mensagem_original
             FROM pedidos
@@ -199,9 +220,9 @@ async def extrair_e_classificar_pedido(
     data_referencia = (
         recebido_em.date()
         if recebido_em is not None
-        else ctx.deps.data_referencia
+        else deps.data_referencia
     )
-    mensagem_mascarada = ctx.deps.mascarador.mascarar(mensagem_original)
+    mensagem_mascarada = deps.mascarador.mascarar(mensagem_original)
 
     instrucao = (
         f'Extraia os dados sem inventar valores. Data de referência: {data_referencia}. '
@@ -213,8 +234,14 @@ async def extrair_e_classificar_pedido(
         'bancários no resultado.'
     )
 
+    orcamento = {
+        chave: valor
+        for chave, valor in (('usage', usage), ('usage_limits', usage_limits))
+        if valor is not None
+    }
     resposta = await _agente_extracao().run(
         f'{instrucao}\n\nMensagem:\n{mensagem_mascarada}',
+        **orcamento,
     )
     pedido = resposta.output
     pedido.pedido_id = id_resolvido
@@ -223,9 +250,9 @@ async def extrair_e_classificar_pedido(
         if item.produto is None:
             item.produto = item.produto_texto
 
-        produto_id = _resolver_produto_id(ctx.deps.conn, item.produto)
+        produto_id = _resolver_produto_id(deps.conn, item.produto)
         if produto_id is not None:
-            row = ctx.deps.conn.execute(
+            row = deps.conn.execute(
                 'SELECT nome FROM produtos WHERE id = %s',
                 (produto_id,),
             ).fetchone()
@@ -236,10 +263,10 @@ async def extrair_e_classificar_pedido(
 
     classificar_pedido(
         pedido,
-        conn=ctx.deps.conn,
+        conn=deps.conn,
         mensagem_original=mensagem_original,
         data_referencia=data_referencia,
-        data_global=ctx.deps.data_referencia,
+        data_global=deps.data_referencia,
     )
 
     return pedido
