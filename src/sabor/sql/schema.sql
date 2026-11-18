@@ -167,6 +167,45 @@ COMMENT ON COLUMN pedido_itens.ambiguo IS
     'Item que exige confirmação ("o queijo da última vez") em vez de suposição.';
 
 -- ---------------------------------------------------------------------------
+-- Triagem em lote da caixa de entrada (#14)
+-- ---------------------------------------------------------------------------
+-- Resultado de `extrair_e_classificar_pedido` rodado fora do chat sobre todos os
+-- `pedidos` (scripts/triagem_lote.py). Tabela própria: a urgência das regras (#10)
+-- tem quatro níveis e `pedidos.urgencia` guarda outra escala.
+-- `hash_entrada` identifica o que gerou o resultado (mensagem, recebimento, data de
+-- referência e versão da triagem): enquanto não mudar, o lote reaproveita a linha.
+
+CREATE TABLE IF NOT EXISTS triagem_pedidos (
+    pedido_id       text PRIMARY KEY REFERENCES pedidos (id) ON DELETE CASCADE,
+    hash_entrada    char(64) NOT NULL,
+    status          text NOT NULL CHECK (status IN ('ok', 'erro')),
+    tipo            text,
+    urgencia        text CHECK (urgencia IN ('critica', 'alta', 'normal', 'baixa')),
+    prioridade      smallint GENERATED ALWAYS AS (
+                        CASE urgencia WHEN 'critica' THEN 0 WHEN 'alta' THEN 1
+                                      WHEN 'normal' THEN 2 WHEN 'baixa' THEN 3 END
+                    ) STORED,
+    comprador       text,
+    data_entrega    date,
+    sinalizacoes    text[] NOT NULL DEFAULT '{}',
+    resultado       jsonb,
+    erro            text,
+    modelo          text,
+    requisicoes     integer NOT NULL DEFAULT 0,
+    tokens_entrada  integer NOT NULL DEFAULT 0,
+    tokens_saida    integer NOT NULL DEFAULT 0,
+    processado_em   timestamptz NOT NULL DEFAULT now(),
+    CHECK (status = 'erro' OR (urgencia IS NOT NULL AND resultado IS NOT NULL))
+);
+
+COMMENT ON COLUMN triagem_pedidos.resultado IS 'Saída completa e validada do modelo Pydantic Pedido.';
+COMMENT ON COLUMN triagem_pedidos.erro IS
+    'Motivo da falha (ex.: orçamento de tokens esgotado); o próximo lote tenta de novo.';
+
+CREATE INDEX IF NOT EXISTS triagem_pedidos_fila_idx
+    ON triagem_pedidos (prioridade, data_entrega);
+
+-- ---------------------------------------------------------------------------
 -- Financeiro e lotes
 -- ---------------------------------------------------------------------------
 
