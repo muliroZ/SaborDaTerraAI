@@ -61,6 +61,10 @@ def _secao_turno(
         linhas += ['**Sinalizações**', '']
         linhas += [f'- **{f.tipo.replace("_", " ")}:** {f.descricao}' for f in resposta.flags]
         linhas.append('')
+    if resposta.relatorios:
+        linhas += ['**Relatórios gerados**', '']
+        linhas += [f'- {r.titulo} (`{r.nome_arquivo}`)' for r in resposta.relatorios]
+        linhas.append('')
     if resposta.rascunhos:
         linhas += ['**Rascunhos**', '']
         for r in resposta.rascunhos:

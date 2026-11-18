@@ -49,6 +49,8 @@ SUGESTOES_FUNCIONARIO = (
     'Quem a SuperBom está devendo e há quanto tempo?',
     'Posso mandar frango caipira para o Hotel Fazenda?',
     'Resuma a situação da Maria das Graças e rascunhe uma mensagem para ela.',
+    'Gere o relatório de contas a receber por comprador.',
+    'Monte o dossiê para a inspeção da ADAGRO: o que pediram, o que temos e o que falta.',
     'Tem dados sobre o PAA?',
 )
 """Perguntas de referência de `docs/projeto.md` usadas na demonstração."""
@@ -57,6 +59,7 @@ SUGESTOES_PRODUTOR = (
     'Quanto eu vendi em setembro e o que tenho a receber?',
     'Tenho pedidos em aberto que eu possa atender?',
     'Minha certificação e meus documentos estão em dia?',
+    'Gere um relatório do que tenho a receber.',
     'Quanto a Rede SuperBom está devendo para o P003?',
 )
 """A última pergunta demonstra o bloqueio de dados de terceiros para o perfil produtor."""
