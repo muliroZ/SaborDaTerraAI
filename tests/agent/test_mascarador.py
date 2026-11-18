@@ -190,6 +190,7 @@ def test_ferramentas_devolvem_resultados_ja_mascarados(monkeypatch):
             'SDR/PE-2019-0047821',
             None,
             ['goiaba'],
+            [],  # produtos de origem animal (#15)
         )
     ]
     produtores = buscar_produtores(ctx)
