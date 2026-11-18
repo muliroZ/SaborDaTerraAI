@@ -15,9 +15,15 @@ Para evitar acoplamento e manter o código limpo (Princípio da Responsabilidade
 ### Estrutura de Arquivos Criada/Atualizada
 
 ```text
+
+scripts/
+├── init_db.py      #Iniciar banco
+├── etl.py          #Dados dos csv. para o banco
+├── ingest_docs.py  #Dados dos txt. para o banco (embeddings)
+
 src/sabor/
 ├── db.py                    # Adicionada role sabor_ro e função conectar_readonly()
-├── tools.py                 # Documentação e convenção snake_case para as tools do time
+├── tools.py                 # Documentação e convenção snake_case para as tools do time, tools da issue #7 e #8
 ├── sql/
 │   └── schema.sql           # Criação idempotente da role sabor_ro (NOLOGIN, apenas SELECT)
 └── agent/
@@ -39,6 +45,7 @@ tests/
 └── tools/   
     └── test_consulta_dados.py # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     └── conftest.py # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
+    └── test_buscar_documentos.py# Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
 ```
 
 ---
@@ -136,6 +143,12 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
   - `consultar_safra(...)` — Consulta disponibilidade sazonal por produto e mês (`1–12` ou abreviação).
 - **Filtro de permissão por perfil (`_resolver_usuario`):** Converte `ctx.deps.usuario` (`str`) automaticamente: se vier no formato de ID de produtor (`P001`, `P003`, etc.), trava a consulta nos dados daquele produtor e bloqueia tentativas de acesso a terceiros com `SemPermissao`; qualquer outro nome (ex.: `'Dona Lúcia'`) opera com perfil `'funcionario'`.
 - **Mascaramento PII:** Já integrado a `ctx.deps.mascarador.mascarar(...)` nos campos sensíveis de `produtores` e `financeiro`.
+### -----------------------------------------------------------------------------------------
+
+
+### ✅ **Issue `#8` (Busca híbrida lexical + vetorial sobre `chunks_busca`):** — *Concluída*
+    - `buscar_documentos(ctx, pergunta, tipo_doc=..., produtor_id=..., apenas_vigentes=..., k=5)` — Combina similaridade vetorial (`gemini-embedding-001`, 768 dims, `RETRIEVAL_QUERY`) e busca lexical (`texto_busca @@ websearch_to_tsquery('portuguese', ...)`) via **RRF** (`k=60`), filtrando metadados antes do ranqueamento, aplicando limiar de relevância (`"sem resultado relevante"` abaixo do piso), cruzando validade documental com `ctx.deps.data_referencia` e devolvendo trechos mascarados com citação `[arquivo · seção]`.
+- **Controle de acesso e privacidade:** Todas as consultas respeitam o perfil resolvido a partir de `ctx.deps.usuario` (`funcionario` vs. `produtor` restrito ao próprio `produtor_id`, lançando `SemPermissao` em tentativas de acesso a terceiros) e mascaram campos sensíveis via `ctx.deps.mascarador.mascarar(...)`.
 ### -----------------------------------------------------------------------------------------
 ---
 
