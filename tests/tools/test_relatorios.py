@@ -272,3 +272,23 @@ def test_dossie_com_busca_hibrida_real(conn):
     md = ctx.deps.relatorios[0].markdown
     assert 'P007' in _secao(md, 3).split('**O que falta**')[1]
     assert 'FIN-2026-018' in _secao(md, 6)
+
+
+def test_destaques_trazem_a_fonte_de_cada_numero(conn, busca_local):
+    """O modelo só vê os destaques: cada número precisa chegar com a própria fonte."""
+    ctx = _ctx(conn)
+    contas = gerar_relatorio(ctx, 'contas_a_receber')
+    pnae = next(d for d in contas.destaques if d.startswith('Prefeitura de Garanhuns'))
+    vencido, a_vencer = pnae.split('; ')
+    assert 'FIN-2026-005' in vencido and 'FIN-2026-030' not in vencido
+    assert '[financeiro.csv · FIN-2026-030]' in a_vencer
+    citadas = {f.referencia for f in contas.fontes}
+    assert {'FIN-2026-013', 'FIN-2026-014', 'FIN-2026-030'} <= citadas
+    assert 'FIN-2026-027' not in citadas  # SESC não aparece em nenhum destaque
+
+    dossie = gerar_relatorio(ctx, 'dossie_adagro')
+    laudos = next(d for d in dossie.destaques if d.startswith('Laudos'))
+    assert '[produtores.csv · P007]' in laudos
+    pendencias = dossie.destaques[-1]
+    assert '[financeiro.csv · FIN-2026-018]' in pendencias
+    assert 'inspecao/inspecao_adagro_2026.txt' in pendencias

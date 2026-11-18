@@ -75,6 +75,10 @@ _RE_DATA = r'(\d{2}/\d{2}/\d{4})'
 _RE_DATA_INSPECAO = re.compile(r'data da inspe[cç][aã]o:\s*' + _RE_DATA, re.IGNORECASE)
 _RE_NC = re.compile(r'(NC-\d{3})\s*\(([^)]+)\)\s*:\s*(.+?)(?=\n\s*NC-\d{3}|\n\s*\n[A-Z]|\Z)', re.S)
 _RE_PRODUTOR = re.compile(r'\bP\d{3}\b')
+_RE_CITACAO = re.compile(r'\[[^\[\]]+ · [^\[\]]+\]')
+
+MAX_CITACOES_DESTAQUE = 4
+"""Fontes coladas em cada destaque, para o modelo citar a fonte certa de cada número."""
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,15 @@ def _tabela(cabecalho: list[str], linhas: list[list[object]]) -> list[str]:
     ]
     saida += ['| ' + ' | '.join(_celula(c) for c in linha) + ' |' for linha in linhas]
     return saida
+
+
+def _citar(fontes: Iterable[Fonte], limite: int = MAX_CITACOES_DESTAQUE) -> str:
+    """Citações de um destaque, sem repetição; indica quantas ficaram só no arquivo."""
+    unicas = list(dict.fromkeys(f.formatar() for f in fontes))
+    texto = ' '.join(unicas[:limite])
+    if len(unicas) > limite:
+        texto += f' (+{len(unicas) - limite} no arquivo)'
+    return texto
 
 
 def _lista(itens: Iterable[str]) -> list[str]:
@@ -394,10 +407,15 @@ def _relatorio_contas_a_receber(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, 
     for comprador, itens in ordem[:3]:
         venc, aven, atraso = _resumo_comprador(itens)
         if venc:
-            destaques.append(
-                f'{comprador}: {_brl(venc)} vencidos (maior atraso {atraso} dias)'
-                + (f' e {_brl(aven)} a vencer.' if aven else '.')
+            texto = (
+                f'{comprador}: {_brl(venc)} vencidos (maior atraso {atraso} dias) '
+                f'{_citar(i.fonte for i in itens if i.vencido)}'
             )
+            if aven:
+                texto += (
+                    f'; {_brl(aven)} a vencer {_citar(i.fonte for i in itens if not i.vencido)}'
+                )
+            destaques.append(texto + '.')
     return _montar(
         'contas_a_receber', titulo, _nome_arquivo('contas_a_receber', ctx, sufixo), linhas, fontes
     ), destaques
@@ -604,12 +622,12 @@ def _relatorio_organicos(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, list[st
         f'{len(org.vigentes)} produtor(es) com certificação vigente e '
         f'{len(produtos_confirmados)} produto(s) confirmados no certificado.',
         *[
-            f'{_rotulo_produtor(p)} vence em {_data(p.validade_certificacao)}.'
+            f'{_rotulo_produtor(p)} vence em {_data(p.validade_certificacao)} {p.fonte.formatar()}.'
             for p in org.vencendo
         ],
         *[
             f'{_rotulo_produtor(p)}: certificação vencida em {_data(p.validade_certificacao)} '
-            'apesar do cadastro.'
+            f'apesar do cadastro {p.fonte.formatar()}.'
             for p in org.vencidos
         ],
     ]
@@ -673,7 +691,7 @@ def _secao_cadastro(
                 f'{_data(p.validade_certificacao)}; atualizar antes da inspeção. '
                 f'{fontes.add(p.fonte)}'
             )
-    secao.resumo = f'{len(produtores)} produtores ({ativos} ativos)'
+    secao.resumo = f'{len(produtores)} produtores ({ativos} ativos); endereço não verificado'
     secao.atencao.append(
         'O endereço completo não é exposto pelas consultas do assistente: conferir direto no '
         'cadastro antes de apresentar.'
@@ -1029,11 +1047,25 @@ def _relatorio_dossie_adagro(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, lis
         if secao.extra:
             linhas += [*secao.extra, '']
 
-    destaques = [
-        f'{s.titulo}: {_ROTULO_SITUACAO[s.situacao]}' + (f' ({s.resumo})' if s.resumo else '')
-        for s in [*secoes, pendencias]
-    ]
+    destaques = [_destaque_secao(s) for s in [*secoes, pendencias]]
     return _montar('dossie_adagro', titulo, nome, linhas, fontes), destaques
+
+
+def _destaque_secao(secao: _Secao) -> str:
+    """Situação do item com as fontes do que falta e, depois, do que existe."""
+    texto = f'{secao.titulo}: {_ROTULO_SITUACAO[secao.situacao]}'
+    if secao.resumo:
+        texto += f' ({secao.resumo})'
+    citacoes = list(
+        dict.fromkeys(
+            c for linha in [*secao.falta, *secao.existe] for c in _RE_CITACAO.findall(linha)
+        )
+    )
+    if citacoes:
+        texto += ' ' + ' '.join(citacoes[:MAX_CITACOES_DESTAQUE])
+        if len(citacoes) > MAX_CITACOES_DESTAQUE:
+            texto += f' (+{len(citacoes) - MAX_CITACOES_DESTAQUE} no arquivo)'
+    return texto
 
 
 # ---------------------------------------------------------------------------
@@ -1073,8 +1105,9 @@ def gerar_relatorio(
     - Resumo de um produtor específico: use `resumir_produtor`.
 
     O arquivo completo é anexado automaticamente à resposta para download. Não copie o
-    relatório no texto: resuma os destaques, cite as fontes e diga que o arquivo está
-    disponível para baixar.
+    relatório no texto: resuma os destaques e diga que o arquivo está disponível para baixar.
+    Cada destaque já traz as fontes do próprio número entre colchetes: cite exatamente essas,
+    junto do número a que se referem, sem trocar nem inventar referências.
     """
     try:
         relatorio, destaques = _MONTADORES[tipo](ctx)
@@ -1090,9 +1123,18 @@ def gerar_relatorio(
         titulo=relatorio.titulo,
         nome_arquivo=relatorio.nome_arquivo,
         destaques=destaques,
-        fontes=relatorio.fontes[:MAX_FONTES_RESUMO],
+        fontes=_fontes_dos_destaques(destaques, relatorio.fontes),
         mensagem=(
             f'Arquivo {relatorio.nome_arquivo} anexado à resposta para download '
-            f'({len(relatorio.fontes)} fontes citadas no arquivo).'
+            f'({len(relatorio.fontes)} fontes citadas no arquivo). Cite cada fonte junto do '
+            'número do destaque em que ela aparece.'
         ),
     )
+
+
+def _fontes_dos_destaques(destaques: list[str], fontes: list[Fonte]) -> list[Fonte]:
+    """Fontes devolvidas ao modelo: as citadas nos destaques (ou as primeiras do arquivo)."""
+    por_citacao = {f.formatar(): f for f in fontes}
+    citadas = dict.fromkeys(c for d in destaques for c in _RE_CITACAO.findall(d))
+    escolhidas = [por_citacao[c] for c in citadas if c in por_citacao]
+    return (escolhidas or fontes)[:MAX_FONTES_RESUMO]
