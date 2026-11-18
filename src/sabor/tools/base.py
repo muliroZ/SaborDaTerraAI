@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel
+from sabor.agent.schemas import Fonte
 
 DATA_REFERENCIA_PADRAO = date(2026, 10, 30)
 TABELA_PRECOS_REFERENCIA_PADRAO = date(2026, 10, 1)
@@ -82,6 +83,8 @@ class Mascarador(Protocol):
 
     def mascarar(self, texto: str) -> str: ...
 
+    def mascarar_campo(self, valor: str | None, categoria: str) -> str | None: ...
+
 
 class _SemMascaramento:
     """No-op de fallback caso nenhum mascarador seja fornecido."""
@@ -93,30 +96,26 @@ class _SemMascaramento:
 SEM_MASCARAMENTO: Mascarador = _SemMascaramento()
 
 
-def _mascarar_opcional(mascarador: Mascarador, valor: str | None) -> str | None:
-    return mascarador.mascarar(valor) if valor is not None else None
+def _mascarar_opcional(
+    mascarador: Mascarador, valor: str | None, categoria: str | None = None
+) -> str | None:
+    if valor is None:
+        return None
+    mascarar_campo_fn = getattr(mascarador, 'mascarar_campo', None)
+    if categoria is not None and callable(mascarar_campo_fn):
+        return mascarar_campo_fn(valor, categoria)
+    return mascarador.mascarar(valor)
 
 
 def _mascarar_pix(mascarador: Mascarador, valor: str | None) -> str | None:
     if valor is None:
         return None
-    mascarar_campo_fn = getattr(mascarador, 'mascarar_campo', None)
-    if callable(mascarar_campo_fn):
-        return mascarar_campo_fn(valor, 'PIX')
-    return mascarador.mascarar(valor)
+    return _mascarar_opcional(mascarador, valor, 'PIX')
 
 
 # ---------------------------------------------------------------------------
 # Fonte (convenção de citação) e resolução de produto_id
 # ---------------------------------------------------------------------------
-
-
-class Fonte(BaseModel):
-    arquivo: str
-    registro: str | None = None
-
-    def __str__(self) -> str:
-        return f'{self.arquivo} · {self.registro}' if self.registro else self.arquivo
 
 
 def _resolver_produto_id(conn: psycopg.Connection, nome_ou_sinonimo: str) -> int | None:

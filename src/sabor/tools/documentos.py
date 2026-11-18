@@ -257,7 +257,7 @@ def buscar_documentos(
                 score_rrf=round(score_rrf_f, 6),
                 similaridade_vetorial=round(sim_vet_f, 4) if sim_vet_f is not None else None,
                 score_lexical=round(score_lex_f, 4) if score_lex_f is not None else None,
-                fonte=Fonte(arquivo=arquivo, registro=secao),
+                fonte=Fonte(arquivo=arquivo, referencia=secao or 'documento'),
             )
         )
         if len(resultados) >= k:
