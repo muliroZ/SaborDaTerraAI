@@ -116,9 +116,14 @@ Implementada com a capability oficial `ModelFallback` do PydanticAI `2.68.0`:
 - Erros de banco de dados (`psycopg.Error`) ou exceções de regra de negócio.
 
 ### Orçamento de Tempo e Falha Segura:
-- **Timeout por chamada de modelo (`TIMEOUT_POR_MODELO_S`):** `8.0s`.
-- **Timeout global do turno (`TIMEOUT_TURNO_S`):** `20.0s`.
-- Se todos os provedores da cadeia falharem (`FallbackExceptionGroup`) ou se o turno ultrapassar **20 segundos**, `processar_turno` captura a falha sem quebrar a aplicação e devolve `RespostaTurno(falha_segura=True, texto=MENSAGEM_FALHA_SEGURA, tentativas_fallback=...)`.
+- **Prazo por chamada de modelo (`TIMEOUT_POR_MODELO_S`, `.env`: `MODELO_TIMEOUT_S`):** `12.0s`, aplicado como `request_timeout` (prazo da requisição inteira, garantido pelo PydanticAI em qualquer modelo) e `timeout` (por tentativa), com `max_retries=0`. Ao estourar, o `ModelFallback` passa para o próximo modelo (`ModelRequestTimeout` é gatilho de fallback). Ajustes da `#49`:
+  - o `timeout` do cliente HTTP só limita a espera entre bytes; o OpenRouter manda keep-alives enquanto processa, e uma chamada ao Qwen chegou a ~35 s com `timeout=8`/`12`. Por isso o prazo total é `request_timeout`;
+  - sem `max_retries=0`, o cliente OpenAI-compatível repete cada requisição 2 vezes. Quem tenta de novo é a cadeia de fallback, trocando de provedor;
+  - em 18/11 o Gemini 3.5 Flash-Lite levou ~6–9 s por chamada, inclusive numa mensagem trivial, e o limite antigo de 8 s derrubava os turnos.
+- **Teto do turno (`TIMEOUT_TURNO_S`, `.env`: `TURNO_TIMEOUT_S`):** `20.0s` (`#37`). O prazo é aplicado dentro da thread do turno com `asyncio.wait_for`, que cancela a requisição em curso. Se a execução não encerrar logo (ex.: tool síncrona no meio de uma consulta), o turno devolve a falha segura em até `TIMEOUT_TURNO_S + FOLGA_ENCERRAMENTO_S` (1 s) sem esperar a thread.
+- **Conexão do turno:** `psycopg` não pega o lock em `close()`, então a conexão aberta pelo turno só é fechada quando livre (`_fechar_quando_livre`). Num turno abandonado, a consulta em andamento é cancelada no servidor (`cancel_safe`).
+- `criar_agente(timeout_s=...)` define o prazo de cada modelo; `processar_turno` não sobrescreve mais esse valor.
+- Se todos os provedores da cadeia falharem (`FallbackExceptionGroup`) ou se o turno ultrapassar o teto, `processar_turno` captura a falha sem quebrar a aplicação e devolve `RespostaTurno(falha_segura=True, texto=MENSAGEM_FALHA_SEGURA, tentativas_fallback=...)`.
 
 ---
 
@@ -230,5 +235,5 @@ Conforme exigido no último item da Issue `#37` (*"Testar se os modelos de fallb
    - **Gemini 3.5 Flash-Lite (Primário):** Suporte nativo a *Structured Outputs* e *Tool Calling* com baixa latência.
    - **Qwen3 32B (Fallback 1 via OpenRouter):** Excelente capacidade de raciocínio e esclarecimento de ambiguidades (`13/15` nos testes de triagem e `3/3` em escolha de ferramenta), porém apresentou **1 saída com schema inválido** (`2/3` em decisão com fonte) e **latência superior a 10s em 4 de 21 chamadas**. Por isso:
      - Implementamos o `resposta_invalida_para_fallback` (Response Handler no `ModelFallback`) para rejeitar automaticamente respostas com schema quebrado e acionar o Fallback 2 (`Mistral Small 3.2`);
-     - Ajustamos o teto global do turno (`TIMEOUT_TURNO_S`) para **20 segundos** (`8s` por chamada individual), evitando que o Qwen3 32B sofra corte prematuro quando acionado.
+     - Ajustamos o teto global do turno (`TIMEOUT_TURNO_S`) para **20 segundos** (hoje `12s` de prazo total por chamada, ver `#49`), evitando que o Qwen3 32B sofra corte prematuro quando acionado.
    - **Mistral Small 3.2 (Fallback 2 via OpenRouter):** Latência muito baixa (`0/21` acima de 10s) e menor custo, mas menor rigor proativo em regras sanitárias sutis (ex.: não sinalizou sozinho a suspensão sanitária de `P017` sem apoio de regra determinística). Isso justifica a manutenção das travas determinísticas em código Python na Etapa 4 fora do prompt.
