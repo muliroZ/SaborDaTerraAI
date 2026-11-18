@@ -1,5 +1,7 @@
 """Ponto de entrada das ferramentas (tools) read-only do agente SaborDaTerraAI."""
 
+from sabor.tools.documentos import buscar_documentos
+from sabor.tools.pedidos import extrair_e_classificar_pedido
 from sabor.tools.consultar_dados import (
     buscar_produtores,
     consultar_financeiro,
@@ -16,6 +18,7 @@ __all__ = [
     'consultar_financeiro',
     'consultar_preco',
     'consultar_safra',
+    'extrair_e_classificar_pedido',
     'rastrear_lote',
     'resumir_produtor',
 ]
