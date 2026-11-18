@@ -402,6 +402,10 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_falha)
+        # Grava também a falha segura para o histórico exibido ficar coerente; a memória
+        # (#31) não a repassa ao modelo nos turnos seguintes.
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_falha)
         return turno_falha
 
     # -----------------------------------------------------------------------

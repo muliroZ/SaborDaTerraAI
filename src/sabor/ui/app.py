@@ -18,6 +18,7 @@ import logging
 import threading
 
 import psycopg
+from pydantic_ai.messages import ModelMessage
 import streamlit as st
 
 from sabor.agent import memoria as sess
@@ -120,30 +121,53 @@ def executar_turno(sessao_id: str, usuario_id: str, mensagem: str) -> RespostaTu
     if not trava.acquire(blocking=False):
         raise TurnoEmAndamento
     try:
-        with conexao() as conn:
-            requisicoes = sess.contar_turnos(conn, sessao_id)
-            max_turnos = sess.max_turnos_memoria()
-            try:
-                turno = processar_turno(
-                    sessao_id,
-                    mensagem,
-                    usuario_id,
-                    agente=agente(),
-                    requisicoes_na_sessao=requisicoes,
-                    carregar_memoria=lambda sid: sess.carregar_historico(conn, sid, max_turnos),
-                )
-            except Exception:
-                logger.exception('Falha inesperada no turno da sessão %s', sessao_id)
-                turno = RespostaTurno(
-                    sessao_id=sessao_id,
-                    usuario=usuario_id,
-                    texto=MENSAGEM_FALHA_SEGURA,
-                    falha_segura=True,
-                )
-            sess.registrar_turno(conn, sessao_id, mensagem.strip(), turno)
-        return turno
+        return _executar_turno_travado(sessao_id, usuario_id, mensagem)
     finally:
         trava.release()
+
+
+def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> RespostaTurno:
+    # Conexões curtas: nenhuma conexão de escrita fica aberta durante a chamada ao modelo.
+    with conexao() as conn:
+        requisicoes = sess.contar_turnos(conn, sessao_id)
+    max_turnos = sess.max_turnos_memoria()
+    gravado = False
+
+    def carregar_memoria(sid: str) -> list[ModelMessage]:  # Etapa 1
+        with conexao() as conn:
+            return sess.carregar_historico(conn, sid, max_turnos)
+
+    def salvar_memoria(sid: str, msg: str, turno: RespostaTurno) -> None:  # Etapa 5b
+        nonlocal gravado
+        with conexao() as conn:
+            sess.registrar_turno(conn, sid, msg, turno)
+        gravado = True
+
+    try:
+        return processar_turno(
+            sessao_id,
+            mensagem,
+            usuario_id,
+            agente=agente(),
+            requisicoes_na_sessao=requisicoes,
+            carregar_memoria=carregar_memoria,
+            salvar_memoria=salvar_memoria,
+        )
+    except psycopg.Error:
+        raise  # banco fora: a página avisa que não conseguiu gravar
+    except Exception:
+        # Erro fora dos tratados pelo orquestrador: responde com falha segura e grava, se o
+        # hook não chegou a gravar, para a pergunta não sumir do histórico.
+        logger.exception('Falha inesperada no turno da sessão %s', sessao_id)
+        turno = RespostaTurno(
+            sessao_id=sessao_id,
+            usuario=usuario_id,
+            texto=MENSAGEM_FALHA_SEGURA,
+            falha_segura=True,
+        )
+        if not gravado:
+            salvar_memoria(sessao_id, mensagem.strip(), turno)
+        return turno
 
 
 def enviar(mensagem: str | None = None) -> None:

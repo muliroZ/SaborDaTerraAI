@@ -151,6 +151,7 @@ def test_processar_turno_falha_segura_quando_todos_provedores_falham():
     deps = AgentDeps(conn=MagicMock())
 
     auditoria_recebida: list[RespostaTurno] = []
+    memoria_salva: list[tuple[str, str, RespostaTurno]] = []
     turno = processar_turno(
         'sess-err',
         'Qual o estoque de mel?',
@@ -158,6 +159,7 @@ def test_processar_turno_falha_segura_quando_todos_provedores_falham():
         agente=agente,
         deps=deps,
         registrar_auditoria=auditoria_recebida.append,
+        salvar_memoria=lambda sid, msg, t: memoria_salva.append((sid, msg, t)),
     )
 
     assert turno.falha_segura is True
@@ -165,6 +167,7 @@ def test_processar_turno_falha_segura_quando_todos_provedores_falham():
     assert turno.texto == MENSAGEM_FALHA_SEGURA
     assert [t.modelo for t in turno.tentativas_fallback] == [MODELO_PRIMARIO, MODELO_FALLBACK_1]
     assert len(auditoria_recebida) == 1
+    assert memoria_salva == [('sess-err', 'Qual o estoque de mel?', turno)]
 
 
 def test_processar_turno_falha_segura_quando_excede_timeout_global():
