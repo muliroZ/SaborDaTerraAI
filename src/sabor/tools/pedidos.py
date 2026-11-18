@@ -14,6 +14,7 @@ from pydantic_ai import Agent, RunContext
 
 from sabor.agent.deps import AgentDeps
 from sabor.tools.base import _resolver_produto_id
+from sabor.tools.regras import classificar_pedido
 
 
 class Item(BaseModel):
@@ -25,6 +26,7 @@ class Item(BaseModel):
     opcional: bool = False
     ambiguo: bool = False
     observacao: str | None = None
+    produtores_elegiveis: list[str] = Field(default_factory=list)
 
 
 class Comprador(BaseModel):
@@ -56,8 +58,7 @@ class Pedido(BaseModel):
     itens: list[Item] = Field(default_factory=list)
     pagamento: str | None = None
     sinalizacoes: list[str] = Field(default_factory=list)
-    urgencia: Literal['baixa', 'media', 'alta'] | None = None
-
+    urgencia: Literal['baixa', 'normal', 'alta', 'critica'] | None = None
 
 _DIAS_SEMANA = {
     'segunda': 0,
@@ -233,7 +234,12 @@ async def extrair_e_classificar_pedido(
 
     _validar_dia_e_data(pedido, mensagem_original, data_referencia)
 
-    # TODO(#10): o responsável pela Issue #10 deve implementar e testar aqui
-    # as regras determinísticas de urgência e sinalização, sem delegá-las ao LLM.
+    classificar_pedido(
+        pedido,
+        conn=ctx.deps.conn,
+        mensagem_original=mensagem_original,
+        data_referencia=data_referencia,
+        data_global=ctx.deps.data_referencia,
+    )
 
     return pedido
