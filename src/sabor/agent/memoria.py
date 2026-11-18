@@ -1,4 +1,4 @@
-"""Sessões de chat e memória no PostgreSQL (etapas 1 e 5b do Agent System, #31).
+"""Sessões de chat e memória da sessão no PostgreSQL (etapas 1 e 5b do Agent System, #31).
 
 Camada mínima usada pela interface (#13): a conversa vive nas tabelas `sessoes` e
 `mensagens`, não em `st.session_state`, então recarregar a página não perde a sessão ativa.

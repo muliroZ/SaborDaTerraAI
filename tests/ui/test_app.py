@@ -7,10 +7,10 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import sabor.agent
-from sabor import sessao as sess
+from sabor.agent import memoria as sess
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
 
-UI = str(Path(__file__).resolve().parents[1] / 'src' / 'sabor' / 'ui.py')
+UI = str(Path(__file__).resolve().parents[2] / 'src' / 'sabor' / 'ui' / 'app.py')
 
 
 class AgenteFalso:
@@ -147,7 +147,7 @@ def test_usuarios_tem_sessoes_isoladas(agente_falso):
 
 
 def test_trava_impede_dois_turnos_simultaneos_na_mesma_sessao(agente_falso):
-    import sabor.ui as ui
+    import sabor.ui.app as ui
 
     trava = ui.trava_da_sessao('sessao-ocupada')
     assert ui.trava_da_sessao('sessao-ocupada') is trava

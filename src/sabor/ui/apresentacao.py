@@ -1,6 +1,6 @@
 """Regras de apresentação da interface Streamlit (#13), sem dependência do Streamlit.
 
-Fica separado de `ui.py` para ser testável: usuários simulados, sugestões da demo,
+Fica separado de `app.py` para ser testável: usuários simulados, sugestões da demo,
 destaque dos retornos antecipados, badges das flags e o trecho exibido para cada fonte.
 """
 

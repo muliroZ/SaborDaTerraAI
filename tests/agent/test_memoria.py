@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from sabor import sessao as sess
+from sabor.agent import memoria as sess
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
 
 

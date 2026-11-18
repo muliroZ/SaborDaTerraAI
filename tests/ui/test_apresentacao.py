@@ -3,7 +3,7 @@
 import psycopg
 import pytest
 
-from sabor import apresentacao as ap
+from sabor.ui import apresentacao as ap
 from sabor.agent.schemas import Flag, Fonte, RespostaTurno, RetornoAntecipado
 from sabor.db import conectar_readonly
 

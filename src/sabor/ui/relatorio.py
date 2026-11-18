@@ -16,8 +16,8 @@ import psycopg
 
 from sabor.agent.deps import obter_data_referencia
 from sabor.agent.schemas import RespostaTurno
-from sabor.apresentacao import destaque_do_turno
-from sabor.sessao import Mensagem, Sessao, listar_mensagens, obter_sessao
+from sabor.agent.memoria import Mensagem, Sessao, listar_mensagens, obter_sessao
+from sabor.ui.apresentacao import destaque_do_turno
 
 FUSO = ZoneInfo('America/Recife')
 

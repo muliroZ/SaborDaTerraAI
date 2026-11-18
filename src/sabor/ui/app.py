@@ -1,6 +1,6 @@
 """Interface Streamlit do SaborDaTerraAI (#13).
 
-Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui.py`).
+Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
 
 - Entrada só pelo chat; cada mensagem chama `processar_turno` (#6).
 - O histórico exibido e a memória do agente vêm do banco (`sessoes`/`mensagens`, #31),
@@ -20,14 +20,14 @@ import threading
 import psycopg
 import streamlit as st
 
-from sabor import apresentacao as ap
-from sabor import sessao as sess
+from sabor.agent import memoria as sess
 from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.deps import obter_data_referencia
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor.agent.schemas import Fonte
 from sabor.db import conectar, conectar_readonly
-from sabor.relatorio import FUSO, relatorio_da_sessao
+from sabor.ui import apresentacao as ap
+from sabor.ui.relatorio import FUSO, relatorio_da_sessao
 
 logger = logging.getLogger(__name__)
 
