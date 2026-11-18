@@ -80,7 +80,12 @@ def carregar_ferramentas_registradas(
             continue
         if callable(fn) and not inspect.isclass(fn):
             mod_origem = getattr(fn, '__module__', None)
-            if nome_modulo is None or mod_origem in (None, nome_modulo):
+            pertence_ao_modulo = (
+                nome_modulo is None
+                or mod_origem in (None, nome_modulo)
+                or (isinstance(mod_origem, str) and mod_origem.startswith(f'{nome_modulo}.'))
+            )
+            if pertence_ao_modulo:
                 ferramentas.append(fn)
                 vistas.add(nome)
 

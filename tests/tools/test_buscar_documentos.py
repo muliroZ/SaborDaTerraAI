@@ -11,10 +11,8 @@ import pytest
 
 from sabor.agent.deps import AgentDeps
 from sabor.db import EMBEDDING_DIM
-from sabor.tools import (
-    SemPermissao,
-    buscar_documentos,
-)
+from sabor.tools.base import SemPermissao
+from sabor.tools.documentos import buscar_documentos
 
 from dotenv import load_dotenv
 
@@ -64,7 +62,7 @@ def test_buscar_documentos_bloqueia_produtor_consultando_terceiro():
 
 def test_buscar_documentos_abaixo_do_limiar_devolve_sem_resultado_relevante(monkeypatch):
     monkeypatch.setattr(
-        "sabor.tools._gerar_embedding_consulta",
+        "sabor.tools.documentos._gerar_embedding_consulta",
         lambda _: [0.0] * EMBEDDING_DIM,
     )
     conn = MagicMock()
@@ -96,7 +94,7 @@ def test_buscar_documentos_abaixo_do_limiar_devolve_sem_resultado_relevante(monk
 
 def test_buscar_documentos_aplica_mascaramento_e_formata_citacao(monkeypatch):
     monkeypatch.setattr(
-        "sabor.tools._gerar_embedding_consulta",
+        "sabor.tools.documentos._gerar_embedding_consulta",
         lambda _: [0.1] * EMBEDDING_DIM,
     )
 

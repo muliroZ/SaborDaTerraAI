@@ -226,7 +226,10 @@ def test_ferramentas_devolvem_resultados_ja_mascarados(monkeypatch):
     assert res_fin.itens[0].chave_pix_deposito == '[PIX_1]'
 
     # 3. buscar_documentos (#8)
-    monkeypatch.setattr('sabor.tools._gerar_embedding_consulta', lambda _: [0.1] * 768)
+    monkeypatch.setattr(
+        'sabor.tools.documentos._gerar_embedding_consulta',
+        lambda _: [0.1] * 768,
+    )
     conn.execute.return_value.fetchall.return_value = [
         (
             'certificacoes/cert_organica_maria_silva_P001.txt',

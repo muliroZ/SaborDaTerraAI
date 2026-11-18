@@ -10,7 +10,10 @@ Este documento descreve a implementação da **Issue `#33`**, responsável pela 
 
 - **[`src/sabor/agent/mascarador.py`](../../src/sabor/agent/mascarador.py):** Implementa a classe `Mascarador` com mapas bidirecionais exclusivamente em memória (`_valor_para_token` e `_token_para_valor`).
 - **[`src/sabor/agent/deps.py`](../../src/sabor/agent/deps.py):** Configura `AgentDeps.mascarador` com `default_factory=Mascarador`, garantindo que cada turno receba uma instância isolada em memória.
-- **[`src/sabor/tools.py`](../../src/sabor/tools.py):** Aplica o mascarador nos retornos de `buscar_produtores` (`#7`), `consultar_financeiro` (`#7`) e `buscar_documentos` (`#8`), além de fornecer `_mascarar_opcional` e `_mascarar_pix` para as demais ferramentas (`#9`, `#11`, `#12`).
+- **[`src/sabor/tools/`](../../src/sabor/tools/):** Pacote modular das ferramentas:
+  - [`base.py`](../../src/sabor/tools/base.py): Fornece `_mascarar_opcional` e `_mascarar_pix`.
+  - [`consultar_dados.py`](../../src/sabor/tools/consultar_dados.py) (`#7`) e [`buscar_documentos.py`](../../src/sabor/tools/buscar_documentos.py) (`#8`): Devolvem resultados já mascarados.
+  - [`pedidos.py`](../../src/sabor/tools/pedidos.py) (`#9`) e [`comunicacao.py`](../../src/sabor/tools/comunicacao.py) (`#11`, `#12`): Módulos dedicados para as próximas tools.
 - **[`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py):**
   - Mascara a mensagem do usuário **antes** de enviá-la ao `Agent` (`deps_exec.mascarador.mascarar(mensagem_limpa)`).
   - Na **Etapa 4c** (`_restaurar_pii_resposta`), restaura os tokens **exclusivamente em `resposta.texto`** (visão do operador interno) e **jamais em `resposta.rascunhos`** (mensagens destinadas a terceiros).

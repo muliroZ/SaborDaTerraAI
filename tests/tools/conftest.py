@@ -17,6 +17,7 @@ usada aqui (ex.: uma env var DATABASE_URL_TESTE lida antes de chamar
 `conectar()`), sem precisar tocar em nenhum teste.
 """
 
+import psycopg
 import pytest
 
 from sabor.db import conectar
@@ -24,7 +25,10 @@ from sabor.db import conectar
 
 @pytest.fixture
 def conn():
-    conexao = conectar()
+    try:
+        conexao = conectar(tentativas=1)
+    except psycopg.OperationalError:
+        pytest.skip('Postgres indisponível (rode `docker compose up -d`)')
     try:
         yield conexao
     finally:

@@ -19,10 +19,8 @@ from datetime import date
 import pytest
 
 from sabor.agent.deps import AgentDeps
-from sabor.tools import (
-    SemPermissao,
-    Usuario,
-    _aplicar_filtro_produtor,
+from sabor.tools.base import SemPermissao, Usuario, _aplicar_filtro_produtor
+from sabor.tools.consultar_dados import (
     _PADRAO_LOTE_ID,
     _PADRAO_NUMERO,
     buscar_produtores,
@@ -178,12 +176,12 @@ def test_pergunta_8_mel_de_jandaira(conn):
 
 
 # =============================================================================
-# 4. Integração — mascaramento no-op hoje (Issue #33 ainda não existe)
+# 4. Integração — mascaramento de PII ativo (Issue #33)
 # =============================================================================
 
-def test_dados_pessoais_passam_sem_mascarar_enquanto_33_nao_existe(conn):
-    """Guarda-chuva: quando a Issue #33 entrar, trocar MascaradorNoOp pelo
-    Mascarador real e este teste deve passar a falhar até o CPF virar token.
-    """
+def test_dados_pessoais_sao_mascarados_por_tokens(conn):
+    """Com a Issue #33 ativa em AgentDeps, CPF, telefone e PIX saem como tokens."""
     produtores = buscar_produtores(_ctx_funcionario(conn), municipio='Garanhuns')
-    assert any(p.cpf and '.' in p.cpf for p in produtores)
+    assert produtores
+    assert all(p.cpf is None or p.cpf.startswith('[CPF_') for p in produtores)
+    assert all(p.chave_pix is None or p.chave_pix.startswith('[PIX_') for p in produtores)
