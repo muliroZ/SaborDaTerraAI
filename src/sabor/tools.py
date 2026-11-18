@@ -135,6 +135,15 @@ def _mascarar_opcional(mascarador: Mascarador, valor: str | None) -> str | None:
     return mascarador.mascarar(valor) if valor is not None else None
 
 
+def _mascarar_pix(mascarador: Mascarador, valor: str | None) -> str | None:
+    if valor is None:
+        return None
+    mascarar_campo_fn = getattr(mascarador, 'mascarar_campo', None)
+    if callable(mascarar_campo_fn):
+        return mascarar_campo_fn(valor, 'PIX')
+    return mascarador.mascarar(valor)
+
+
 # ---------------------------------------------------------------------------
 # Fonte (convenção de citação)
 # ---------------------------------------------------------------------------
@@ -283,7 +292,7 @@ def buscar_produtores(
             cpf=_mascarar_opcional(mascarador, cpf),
             telefone=_mascarar_opcional(mascarador, telefone),
             email=_mascarar_opcional(mascarador, email),
-            chave_pix=_mascarar_opcional(mascarador, pix),
+            chave_pix=_mascarar_pix(mascarador, pix),
             banco=_mascarar_opcional(mascarador, banco),
             agencia=_mascarar_opcional(mascarador, agencia),
             conta_corrente=_mascarar_opcional(mascarador, conta),
@@ -393,7 +402,7 @@ def consultar_financeiro(
             status_pagamento=status_pg, vencido=vencido,
             data_vencimento=venc, data_pagamento=pago_em,
             alerta_divergencia=bool(divergencia),
-            chave_pix_deposito=_mascarar_opcional(mascarador, pix_dep),
+            chave_pix_deposito=_mascarar_pix(mascarador, pix_dep),
             fonte=Fonte(arquivo="financeiro.csv", registro=idt),
         ))
 

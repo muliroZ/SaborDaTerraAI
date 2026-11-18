@@ -20,7 +20,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import Model
 
 from sabor import tools as modulo_tools
-from sabor.agent.deps import AgentDeps, MascaradorNoOp, obter_data_referencia
+from sabor.agent.deps import AgentDeps, obter_data_referencia
 from sabor.agent.fallback import (
     TIMEOUT_POR_MODELO_S,
     configuracao_padrao_modelo,
@@ -28,8 +28,9 @@ from sabor.agent.fallback import (
     extrair_metadados_resposta,
     extrair_tentativas_de_excecao,
 )
+from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
-from sabor.agent.schemas import Rascunho, RespostaAgente, RespostaTurno, TentativaFallback
+from sabor.agent.schemas import RespostaAgente, RespostaTurno, TentativaFallback
 from sabor.db import conectar_readonly
 
 TIMEOUT_TURNO_S = 20.0
@@ -115,26 +116,13 @@ def criar_agente(
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
-    """Etapa 4c: Restaura dados mascarados para visualização do operador interno (#33)."""
+    """Etapa 4c: Restaura tokens só no texto do operador; nunca em rascunhos (#33)."""
     restaurar_fn = getattr(mascarador, 'restaurar', None)
     if not callable(restaurar_fn):
         return resposta
 
     texto_restaurado = restaurar_fn(resposta.texto)
-    rascunhos_restaurados = [
-        Rascunho(
-            destinatario=restaurar_fn(r.destinatario),
-            canal=r.canal,
-            conteudo=restaurar_fn(r.conteudo),
-        )
-        for r in resposta.rascunhos
-    ]
-    return resposta.model_copy(
-        update={
-            'texto': texto_restaurado,
-            'rascunhos': rascunhos_restaurados,
-        }
-    )
+    return resposta.model_copy(update={'texto': texto_restaurado})
 
 
 def processar_turno(
@@ -213,8 +201,12 @@ def processar_turno(
                     conn=conn_ro,
                     data_referencia=obter_data_referencia(),
                     usuario=usuario,
-                    mascarador=MascaradorNoOp(),
+                    mascarador=Mascarador(),
                 )
+            )
+            mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+            mensagem_para_llm = (
+                mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
             )
             settings_turno = configuracao_padrao_modelo(
                 timeout_s=min(TIMEOUT_POR_MODELO_S, timeout_turno_s)
@@ -222,7 +214,7 @@ def processar_turno(
             with ThreadPoolExecutor(max_workers=1) as executor:
                 futuro = executor.submit(
                     agente_exec.run_sync,
-                    mensagem_limpa,
+                    mensagem_para_llm,
                     deps=deps_exec,
                     message_history=historico,
                     model_settings=settings_turno,

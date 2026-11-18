@@ -102,9 +102,10 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
     assert turno.falha_segura is False
     assert turno.modelo_efetivo == MODELO_PRIMARIO
     assert turno.provedor_efetivo == 'function'
-    # Verifica restauração de PII na Etapa 4
+    # Etapa 4c (#33): restaura PII no texto para o operador, mas NUNCA nos rascunhos para terceiros!
     assert '111.222.333-44' in turno.texto
-    assert '111.222.333-44' in turno.rascunhos[0].destinatario
+    assert '111.222.333-44' not in turno.rascunhos[0].destinatario
+    assert '[CPF_MASCARADO]' in turno.rascunhos[0].destinatario
     assert len(turno.fontes) == 1
 
 

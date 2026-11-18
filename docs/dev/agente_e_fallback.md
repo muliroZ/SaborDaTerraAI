@@ -166,12 +166,15 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 
 ---
 
-### 🔒 Issue `#33` — Mascaramento de Dados Pessoais (PII) antes do LLM e Restauração (Etapa 3.3 → 4c)
-- **O que já está pronto no agente:**
-  - `AgentDeps.mascarador` já existe (usando `MascaradorNoOp` como fallback).
-  - Na **Etapa 4c**, `_restaurar_pii_resposta()` em [`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py) já chama `deps.mascarador.restaurar(...)` sobre `resposta.texto` e sobre `destinatario` e `conteudo` de cada item em `resposta.rascunhos`.
-- **O que a Issue `#33` precisa fazer quando ficar pronta:**
-  - Substituir `MascaradorNoOp()` pelo mascarador real ao instanciar `AgentDeps` (e chamar `ctx.deps.mascarador.mascarar(...)` na saída das ferramentas que retornam CPF, telefone, endereço ou dados bancários/PIX).
+### 🔒 Issue `#33` — Mascaramento de Dados Pessoais (PII) antes do LLM e Restauração (Etapa 3.3 → 4c) — ✅ CONCLUÍDA
+- **Onde está implementado:** [`src/sabor/agent/mascarador.py`](../../src/sabor/agent/mascarador.py), integrado em [`deps.py`](../../src/sabor/agent/deps.py), [`runner.py`](../../src/sabor/agent/runner.py) e [`tools.py`](../../src/sabor/tools.py).
+- **Como funciona:**
+  - `AgentDeps.mascarador` cria uma instância de `Mascarador` por turno (com mapa `token -> valor` exclusivamente em memória).
+  - Substitui CPF, RG, telefone, e-mail, banco, agência, conta corrente e chave PIX por tokens (`[CPF_1]`, `[RG_1]`, `[TEL_1]`, `[EMAIL_1]`, `[BANCO_1]`, `[AGENCIA_1]`, `[CONTA_1]`, `[PIX_1]`), aceitando formatos com e sem pontuação.
+  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, e futuras `#9`, `#11`, `#12`).
+  - Na **Etapa 4c**, `_restaurar_pii_resposta()` restaura os tokens **exclusivamente em `resposta.texto`** (para o operador interno) e **nunca em `resposta.rascunhos`** (protegendo rascunhos destinados a terceiros conforme a LGPD).
+- **Como as futuras tools (`#9`, `#11`, `#12`) devem usar:**
+  - Basta chamar `ctx.deps.mascarador.mascarar(texto)` (ou `ctx.deps.mascarador.mascarar_campo(valor, 'PIX')`) antes de devolver qualquer string com dados de produtores/compradores.
 
 ---
 
