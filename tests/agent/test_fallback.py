@@ -525,3 +525,98 @@ def test_circuit_breaker_nao_abre_em_schema_rejeitado_pontual():
     assert chamadas == ['gemini', 'qwen', 'gemini']
 
 
+def test_converte_resposta_texto_livre_com_citacoes_em_final_result():
+    """Modelos OpenRouter (Mistral/Qwen) que respondem em texto após tool call são aceitos."""
+
+    def consultar_financeiro(comprador: str) -> str:
+        return f'faturas_de_{comprador}'
+
+    passo = [0]
+
+    def fn_mistral_texto(messages, info: AgentInfo) -> ModelResponse:
+        passo[0] += 1
+        if passo[0] == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name='consultar_financeiro',
+                        args={'comprador': 'SuperBom'},
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    content=(
+                        'A SuperBom deve R$ 6.020,00 [financeiro.csv · FIN-2026-013] '
+                        'e [financeiro.csv · FIN-2026-014].'
+                    )
+                )
+            ]
+        )
+
+    m = FunctionModel(fn_mistral_texto, model_name=MODELO_FALLBACK_2)
+    agente = Agent(
+        output_type=RespostaAgente,
+        tools=[consultar_financeiro],
+        retries=0,
+        capabilities=[construir_capability_fallback([m])],
+    )
+
+    res = agente.run_sync('Quem a SuperBom está devendo?')
+    assert res.output.texto == 'A SuperBom deve R$ 6.020,00.'
+    assert 'financeiro.csv' not in res.output.texto
+    assert 'Fontes:' not in res.output.texto
+    assert [(f.arquivo, f.referencia) for f in res.output.fontes] == [
+        ('financeiro.csv', 'FIN-2026-013'),
+        ('financeiro.csv', 'FIN-2026-014'),
+    ]
+
+
+def test_prepare_tools_oculta_gerar_relatorio_em_pergunta_simples():
+    """Em perguntas pontuais sem pedido de relatório, `gerar_relatorio` não é oferecido ao LLM."""
+    tools_vistas_pelo_modelo: list[list[str]] = []
+
+    def consultar_financeiro(comprador: str) -> dict:
+        return {
+            'itens': [
+                {
+                    'valor_total': 6020.0,
+                    'fonte': {'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-013'},
+                }
+            ]
+        }
+
+    def gerar_relatorio(tipo: str) -> dict:
+        return {'gerado': True, 'tipo': tipo}
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        tools_vistas_pelo_modelo.append([t.name for t in info.function_tools])
+        return ModelResponse(
+            parts=[
+                TextPart(
+                    content=(
+                        'A SuperBom deve R$ 6.020,00 desde 18/09/2026 '
+                        '[financeiro.csv · FIN-2026-013].'
+                    )
+                )
+            ]
+        )
+
+    m = FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)
+    agente = Agent(
+        output_type=RespostaAgente,
+        tools=[consultar_financeiro, gerar_relatorio],
+        retries=0,
+        capabilities=[construir_capability_fallback([m])],
+    )
+
+    agente.run_sync('Quem a SuperBom está devendo e há quanto tempo?')
+    assert tools_vistas_pelo_modelo[-1] == ['consultar_financeiro']
+
+    agente.run_sync('Gere o relatório de contas a receber')
+    assert 'gerar_relatorio' in tools_vistas_pelo_modelo[-1]
+
+
+
+

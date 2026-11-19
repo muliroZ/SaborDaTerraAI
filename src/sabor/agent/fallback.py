@@ -7,9 +7,11 @@ from dataclasses import dataclass, field
 import logging
 import math
 import os
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any
+import unicodedata
 
 from dotenv import load_dotenv
 import httpx
@@ -27,9 +29,12 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelRequest,
     ModelResponse,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
@@ -37,7 +42,7 @@ from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
 
 from sabor.agent.schemas import RespostaAgente, TentativaFallback
 
@@ -151,6 +156,201 @@ def deve_fazer_fallback_excecao(exc: Exception) -> bool:
         return _eh_erro_rede_ou_timeout(exc.__cause__)
 
     return False
+
+
+_PADRAO_CITACAO_FONTE = re.compile(r'\[([^[\]·\n]+?)\s*(?:·|-)\s*([^[\]\n]+?)\]')
+_PADRAO_CITACAO_FONTE_PONTO = re.compile(r'\[([^[\]·\n]+?)\s*·\s*([^[\]\n]+?)\]')
+_PADRAO_LINHA_FONTES = re.compile(
+    r'(?im)^[ \t]*(?:[-*]\s*)?\*{0,2}fontes?\*{0,2}\s*:.*(?:\n|$)'
+)
+_PADRAO_GRUPO_CITACOES_PARENTESES = re.compile(
+    r'[ \t]*\(\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]'
+    r'(?:\s*(?:,|;|e|\+)?\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\])*\s*\)'
+)
+_PADRAO_GRUPO_CITACOES_INLINE = re.compile(
+    r'[ \t]*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]'
+    r'(?:\s*(?:,|;|e|\+)?\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\])*'
+)
+
+_TERMOS_SOLICITACAO_RELATORIO = (
+    'relat',
+    'levantamento',
+    'dossie',
+    'planilha',
+    'baixar',
+    'download',
+    'exportar',
+    'checklist',
+    'consolidado',
+    'consolidada',
+    'balanco',
+    'panorama',
+    'quadro geral',
+    'adagro',
+    'ped-2026-014',
+    'ped-014',
+)
+
+
+def _normalizar_busca(texto: str) -> str:
+    sem_acentos = ''.join(
+        c for c in unicodedata.normalize('NFKD', texto) if not unicodedata.combining(c)
+    )
+    return sem_acentos.lower()
+
+
+def mensagem_solicita_relatorio(texto: str) -> bool:
+    """Indica se o pedido do usuário solicita explicitamente relatório, levantamento ou dossiê."""
+    if not texto or not texto.strip():
+        return False
+    norm = _normalizar_busca(texto)
+    return any(termo in norm for termo in _TERMOS_SOLICITACAO_RELATORIO)
+
+
+def limpar_citacoes_inline_texto(texto: str) -> str:
+    """Remove blocos `Fontes:` e colchetes `[arquivo · referencia]` redundantes do corpo do texto.
+
+    Como exige o separador `·`, tokens de mascaramento PII (`[CPF_1]`, `[TEL_1]`, etc.) permanecem
+    intactos.
+    """
+    if not texto:
+        return texto
+    limpo = _PADRAO_LINHA_FONTES.sub('', texto)
+    limpo = _PADRAO_GRUPO_CITACOES_PARENTESES.sub('', limpo)
+    limpo = _PADRAO_GRUPO_CITACOES_INLINE.sub('', limpo)
+    limpo = re.sub(r'[ \t]+([.,;:])', r'\1', limpo)
+    limpo = re.sub(r'\n{3,}', '\n\n', limpo).strip()
+    return limpo or texto.strip()
+
+
+def _mensagens_turno_atual(mensagens: Sequence[ModelMessage]) -> Sequence[ModelMessage]:
+    """Recorta apenas as mensagens a partir do último `UserPromptPart` (turno atual)."""
+    for idx in range(len(mensagens) - 1, -1, -1):
+        msg = mensagens[idx]
+        if isinstance(msg, ModelRequest) and any(
+            isinstance(p, UserPromptPart) for p in msg.parts
+        ):
+            return mensagens[idx:]
+    return mensagens
+
+
+def _extrair_texto_usuario_turno(
+    ctx: RunContext[Any],
+    msgs_turno: Sequence[ModelMessage],
+) -> str:
+    partes: list[str] = []
+    prompt_ctx = getattr(ctx, 'prompt', None)
+    if isinstance(prompt_ctx, str):
+        partes.append(prompt_ctx)
+    elif isinstance(prompt_ctx, Sequence):
+        partes.extend(p for p in prompt_ctx if isinstance(p, str))
+
+    for msg in msgs_turno:
+        if isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, UserPromptPart):
+                    if isinstance(part.content, str):
+                        partes.append(part.content)
+                    elif isinstance(part.content, Sequence):
+                        partes.extend(c for c in part.content if isinstance(c, str))
+    return ' '.join(partes)
+
+
+def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) -> None:
+    """Extrai pares `(arquivo, referencia)` reais de objetos `Fonte` nos retornos das tools."""
+    if valor is None:
+        return
+    if isinstance(valor, dict):
+        arq = valor.get('arquivo')
+        ref = valor.get('referencia')
+        if isinstance(arq, str) and isinstance(ref, str) and arq.strip() and ref.strip():
+            destino.append((arq.strip(), ref.strip()))
+            return
+        for v in valor.values():
+            _coletar_fontes_de_retorno_tool(v, destino)
+        return
+    if isinstance(valor, (list, tuple, set)):
+        for item in valor:
+            _coletar_fontes_de_retorno_tool(item, destino)
+        return
+    arq = getattr(valor, 'arquivo', None)
+    ref = getattr(valor, 'referencia', None)
+    if isinstance(arq, str) and isinstance(ref, str) and arq.strip() and ref.strip():
+        destino.append((arq.strip(), ref.strip()))
+        return
+    if hasattr(valor, 'model_dump'):
+        try:
+            _coletar_fontes_de_retorno_tool(valor.model_dump(), destino)
+        except Exception:
+            pass
+
+
+def _normalizar_resposta_texto_livre(
+    response: ModelResponse,
+    mensagens_contexto: Sequence[ModelMessage] = (),
+) -> ModelResponse:
+    """Converte resposta final em texto Markdown puro (comum no Mistral/Qwen via OpenRouter
+    após retorno de tools) em `ToolCallPart('final_result')`, extraindo as citações
+    `[arquivo · referencia]` ou reaproveitando as fontes retornadas pelas tools no turno.
+    Strings que começam com `{` (JSON malformado) não são convertidas para continuarem sendo
+    rejeitadas por `resposta_invalida_para_fallback`.
+    """
+    if not response.parts or any(isinstance(p, ToolCallPart) for p in response.parts):
+        return response
+
+    texto = ''.join(p.content for p in response.parts if isinstance(p, TextPart)).strip()
+    if not texto or texto.startswith('{'):
+        return response
+
+    try:
+        RespostaAgente.model_validate_json(texto)
+        return response
+    except ValidationError:
+        pass
+
+    pares_fontes: list[tuple[str, str]] = [
+        (arq.strip(), ref.strip()) for arq, ref in _PADRAO_CITACAO_FONTE.findall(texto)
+    ]
+    if not pares_fontes and mensagens_contexto:
+        for msg in _mensagens_turno_atual(mensagens_contexto):
+            if isinstance(msg, ModelRequest):
+                for part in msg.parts:
+                    if isinstance(part, ToolReturnPart):
+                        _coletar_fontes_de_retorno_tool(part.content, pares_fontes)
+
+    fontes: list[dict[str, str]] = []
+    vistas: set[tuple[str, str]] = set()
+    for arq, ref in pares_fontes:
+        chave = (arq, ref)
+        if arq and ref and chave not in vistas:
+            vistas.add(chave)
+            fontes.append({'arquivo': arq, 'referencia': ref})
+
+    texto_limpo = limpar_citacoes_inline_texto(texto)
+
+    nova_part = ToolCallPart(
+        tool_name='final_result',
+        args={
+            'texto': texto_limpo,
+            'fontes': fontes,
+            'flags': [],
+            'rascunhos': [],
+        },
+        tool_call_id='final_result_text_fallback',
+    )
+    return ModelResponse(
+        parts=[nova_part],
+        usage=response.usage,
+        model_name=response.model_name,
+        timestamp=response.timestamp,
+        provider_name=response.provider_name,
+        provider_url=response.provider_url,
+        provider_details=response.provider_details,
+        provider_response_id=response.provider_response_id,
+        finish_reason=response.finish_reason,
+        run_id=response.run_id,
+        metadata=response.metadata,
+    )
 
 
 def resposta_invalida_para_fallback(response: ModelResponse) -> bool:
@@ -308,6 +508,51 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
                 saudaveis.append(candidato)
         return saudaveis, em_quarentena
 
+    async def prepare_tools(
+        self,
+        ctx: RunContext[Any],
+        tool_defs: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        """Restringe ferramentas redundantes ou não solicitadas no passo atual:
+        - `gerar_relatorio` só fica disponível quando o usuário pede explicitamente um relatório,
+          levantamento, planilha para download ou dossiê da ADAGRO (`PED-2026-014`).
+        - Após `gerar_relatorio` executar no turno, encerra novas chamadas de função.
+        - Após `resumir_produtor` executar no turno, bloqueia chamadas redundantes de resumo,
+          busca de produtores, financeiro ou rascunho de pedido.
+        """
+        tool_defs = await super().prepare_tools(ctx, tool_defs)
+        if len(tool_defs) <= 1:
+            return tool_defs
+
+        msgs_turno = _mensagens_turno_atual(getattr(ctx, 'messages', ()) or ())
+        texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
+        ferramentas_executadas = {
+            part.tool_name
+            for msg in msgs_turno
+            if isinstance(msg, ModelRequest)
+            for part in msg.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name
+        }
+
+        if 'gerar_relatorio' in ferramentas_executadas:
+            return []
+
+        filtradas = list(tool_defs)
+        if not mensagem_solicita_relatorio(texto_usuario):
+            filtradas = [t for t in filtradas if t.name != 'gerar_relatorio']
+
+        if 'resumir_produtor' in ferramentas_executadas:
+            bloqueadas_pos_resumo = {
+                'resumir_produtor',
+                'buscar_produtores',
+                'consultar_financeiro',
+                'rascunhar_notificacao',
+                'gerar_relatorio',
+            }
+            filtradas = [t for t in filtradas if t.name not in bloqueadas_pos_resumo]
+
+        return filtradas
+
     async def prepare_model_request(
         self,
         ctx: RunContext[Any],
@@ -370,8 +615,11 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
+        response_norm = _normalizar_resposta_texto_livre(
+            response, getattr(request_context, 'messages', ())
+        )
         resultado = await super().after_model_request(
-            ctx, request_context=request_context, response=response
+            ctx, request_context=request_context, response=response_norm
         )
         self._circuit.registrar_sucesso(_chave_modelo(request_context.model))
         return resultado
