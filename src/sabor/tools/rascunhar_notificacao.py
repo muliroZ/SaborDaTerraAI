@@ -9,6 +9,9 @@ import inspect
 import json
 from typing import TYPE_CHECKING, Any
 
+from pydantic_ai import RunContext
+
+from sabor.agent.deps import AgentDeps
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaAgente
 from sabor.tools.base import SemPermissao, _resolver_usuario
 from sabor.tools.pedidos import Comprador, Entrega, Item, Pedido, extrair_e_classificar
@@ -138,7 +141,7 @@ async def _extrair_pedido_oficial(
 
 
 async def rascunhar_notificacao(
-    ctx: Any,
+    ctx: RunContext[AgentDeps],
     *,
     pedido_id: str | None = None,
     texto_pedido: str | None = None,
