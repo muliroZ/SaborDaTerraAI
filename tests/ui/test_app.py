@@ -363,3 +363,23 @@ def test_relatorio_sob_demanda_tem_download_e_persiste(agente_falso):
     # Recarregar a página mantém o relatório no histórico (salvo junto com o turno).
     recarregada = _app('Seu Antônio')
     assert len(recarregada.get('download_button')) == 1
+
+
+def test_chat_input_fica_travado_enquanto_turno_executa(agente_falso, monkeypatch):
+    import streamlit as st
+
+    chamadas_input: list[tuple[str | None, bool]] = []
+    chat_input_original = st.chat_input
+
+    def spy_chat_input(*args, **kwargs):
+        chamadas_input.append((kwargs.get('key'), bool(kwargs.get('disabled'))))
+        return chat_input_original(*args, **kwargs)
+
+    monkeypatch.setattr(st, 'chat_input', spy_chat_input)
+    at = _app('P013')
+    chamadas_input.clear()
+    at.chat_input[0].set_value('tenho pedidos?').run()
+
+    assert not at.exception
+    assert chamadas_input == [('entrada_bloqueada', True), ('entrada', False)]
+    assert not at.chat_input[0].disabled

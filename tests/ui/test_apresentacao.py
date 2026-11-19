@@ -26,6 +26,8 @@ def test_rotulo_e_sugestoes_por_perfil():
     assert ap.rotulo_usuario('Dona Lúcia') == 'Dona Lúcia · equipe da cooperativa'
     assert ap.sugestoes_para('P005') == ap.SUGESTOES_PRODUTOR
     assert ap.sugestoes_para('Seu Antônio') == ap.SUGESTOES_FUNCIONARIO
+    assert len(ap.SUGESTOES_FUNCIONARIO) == 3
+    assert len(ap.SUGESTOES_PRODUTOR) == 3
 
 
 @pytest.mark.parametrize(

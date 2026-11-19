@@ -18,7 +18,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import fields
 import logging
-import os
 import threading
 
 import psycopg
@@ -28,6 +27,7 @@ import streamlit as st
 from sabor.agent import memoria as sess
 from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.deps import obter_data_referencia
+from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor.agent.schemas import Fonte
 from sabor import triagem
@@ -507,7 +507,27 @@ def main() -> None:
         )
         st.stop()
 
-    render_sidebar_sessao(sessao, estado.processando)
+    processando = estado.processando or trava_da_sessao(sessao.id).locked()
+    # Bloqueia clique, foco e seleção na caixa inteira do chat enquanto o agente responde.
+    st.html(
+        '<style>'
+        '[data-testid="stElementContainer"]:has([data-testid="stChatInput"] textarea:disabled)'
+        '{cursor:not-allowed;}'
+        '[data-testid="stChatInput"]:has(textarea:disabled)'
+        '{pointer-events:none!important;user-select:none!important;opacity:0.5;}'
+        '</style>'
+    )
+    placeholder = 'Pergunte sobre pedidos, produtores, lotes, safra…'
+    st.chat_input(
+        'Aguarde a resposta…' if processando else placeholder,
+        key='entrada_bloqueada' if processando else 'entrada',
+        on_submit=None if processando else enviar,
+        disabled=processando,
+        submit_mode='disable',
+        max_chars=obter_limites_configurados()['max_caracteres'],
+    )
+
+    render_sidebar_sessao(sessao, processando)
 
     perfil = 'produtor' if ap.eh_produtor(usuario_id) else 'equipe da cooperativa'
     st.title(NOME_ASSISTENTE, anchor=False, icon=ICONE_ASSISTENTE)
@@ -516,15 +536,19 @@ def main() -> None:
     if aviso := estado.pop('aviso', None):
         st.warning(aviso, icon=':material/warning:')
 
-    if not mensagens and not estado.pendente:
-        with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
-            st.markdown(
-                f'Olá! Sou o **{NOME_ASSISTENTE}**, assistente da Cooperativa Sabor da Terra. '
-                'Posso interpretar pedidos, consultar certificações, lotes, safra, preços e '
-                'financeiro, e preparar resumos e rascunhos para produtores. '
-                'Escreva sua pergunta abaixo ou escolha uma sugestão:'
-            )
-            render_sugestoes(usuario_id, estado.processando)
+    boas_vindas = st.empty()
+    if not mensagens and not processando:
+        with boas_vindas.container():
+            with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
+                st.markdown(
+                    f'Olá! Sou o **{NOME_ASSISTENTE}**, assistente da Cooperativa Sabor da Terra. '
+                    'Posso interpretar pedidos, consultar certificações, lotes, safra, preços e '
+                    'financeiro, e preparar resumos e rascunhos para produtores. '
+                    'Escreva sua pergunta abaixo ou escolha uma sugestão:'
+                )
+                render_sugestoes(usuario_id, processando)
+    else:
+        boas_vindas.empty()
 
     for msg in mensagens:
         if msg.papel == 'usuario':
@@ -534,20 +558,16 @@ def main() -> None:
             with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
                 render_resposta(msg.turno, usuario_id, chave=str(msg.id))
 
-    if mensagens and not estado.pendente:
+    atalho_sugestoes = st.empty()
+    if mensagens and not processando:
         # Com a conversa em andamento, as sugestões ficam num botão compacto no fim do chat.
-        with st.popover('Sugestões de perguntas', icon=':material/lightbulb:', type='tertiary'):
-            render_sugestoes(usuario_id, estado.processando, prefixo='sugestao_conversa')
-
-    placeholder = 'Pergunte sobre pedidos, produtores, lotes, safra…'
-    st.chat_input(
-        'Aguarde a resposta…' if estado.processando else placeholder,
-        key='entrada',
-        on_submit=enviar,
-        disabled=estado.processando,
-        submit_mode='disable',
-        max_chars=int(os.getenv('GUARDRAIL_MAX_CHARS', '750')),
-    )
+        with atalho_sugestoes.container():
+            with st.popover(
+                'Sugestões de perguntas', icon=':material/lightbulb:', type='tertiary'
+            ):
+                render_sugestoes(usuario_id, processando, prefixo='sugestao_conversa')
+    else:
+        atalho_sugestoes.empty()
 
     if estado.pendente:
         mensagem = estado.pendente
