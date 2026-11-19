@@ -49,3 +49,18 @@ uv run python scripts/triagem_lote.py --csv fila.csv --json fila.json
 ```
 
 Roda `extrair_e_classificar_pedido` em todos os `pedidos`, fora do chat, grava em `triagem_pedidos` e mostra a fila ordenada por urgência (crítica → baixa; erros, desatualizados e pendentes no fim). Pedidos já extraídos não voltam ao LLM, mas as regras rodam de novo sobre o banco atual sem gastar tokens; cada pedido respeita o orçamento do turno (`TURNO_TOKENS_LIMIT`/`TURNO_REQUEST_LIMIT`) e o lote tem teto próprio (`TRIAGEM_TOKENS_LIMIT`, padrão 150 mil tokens). Opções: `--limite N`, `--tokens N`, `--reprocessar` e `--somente-exportar` (sem LLM). Na interface, a equipe vê a fila em "Caixa de entrada". Detalhes em [docs/dev/triagem_lote.md](docs/dev/triagem_lote.md).
+
+## Tudo em Docker (Plano B da demo)
+
+A aplicação também roda em container, com a mesma imagem usada no Cloud Run. O serviço `app` fica no perfil `app`, então `docker compose up -d` continua subindo só o banco.
+
+```bash
+docker compose --profile app build
+docker compose up -d db
+docker compose --profile app run --rm app python scripts/init_db.py
+docker compose --profile app run --rm app python scripts/etl.py
+docker compose --profile app run --rm app python scripts/ingest_docs.py
+docker compose --profile app up -d   # http://localhost:8501 (APP_PORT no .env muda a porta)
+```
+
+O mapeamento local → GCP (Cloud Run + Cloud SQL + Secret Manager) e o passo a passo do deploy opcional estão em [docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md).

@@ -162,4 +162,5 @@ Pedidos que **solicitam** esses dados e exigem cuidado: PED-2026-009 (Hospital p
 - **Vai desenhar a arquitetura ou preparar a demonstração?** Comece por [projeto.md](projeto.md), que tem os requisitos ligados às fontes, as perguntas de referência e as lacunas em que o assistente deve dizer "não encontrei".
 - **Vai construir a ingestão ou os embeddings?** Comece pelo schema de cada fonte e pela seção "Qualidade dos dados" do doc correspondente.
 - **Vai escrever prompts ou regras do assistente?** Leia [pedidos.md](fontes/pedidos.md), que traz a triagem das 15 mensagens com as fontes e restrições envolvidas em cada uma, e [certificacoes.md](fontes/certificacoes.md), que traz as regras de conformidade.
+- **Vai subir a demo em Docker ou fazer o deploy no Google Cloud?** Veja [arquitetura/deploy_gcp.md](arquitetura/deploy_gcp.md), com o mapeamento local → GCP (Cloud Run + Cloud SQL) e o Plano B local.
 - **Vai fazer cotações ou checar disponibilidade?** Use [tabela_precos.md](fontes/tabela_precos.md), [sazonalidade.md](fontes/sazonalidade.md) e [fichas_tecnicas.md](fontes/fichas_tecnicas.md), que traz a capacidade semanal por produtor.
