@@ -329,9 +329,11 @@ CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_e
 -- ---------------------------------------------------------------------------
 -- Cada sessão isola o contexto do agente: "Nova sessão" encerra a atual
 -- (`encerrada_em`) e a conversa antiga só volta como relatório somente leitura (#38).
+-- `id` é text (UUID gerado por padrão) para casar com `auditoria_mensagens.sessao_id` e
+-- com o contrato `processar_turno(sessao_id: str)`.
 
 CREATE TABLE IF NOT EXISTS sessoes (
-    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    id            text PRIMARY KEY DEFAULT gen_random_uuid()::text,
     usuario_id    text NOT NULL,
     perfil        text NOT NULL CHECK (perfil IN ('funcionario', 'produtor')),
     criada_em     timestamptz NOT NULL DEFAULT now(),
@@ -345,7 +347,7 @@ CREATE INDEX IF NOT EXISTS sessoes_usuario_idx ON sessoes (usuario_id, criada_em
 
 CREATE TABLE IF NOT EXISTS mensagens (
     id         bigserial PRIMARY KEY,
-    sessao_id  uuid NOT NULL REFERENCES sessoes (id) ON DELETE CASCADE,
+    sessao_id  text NOT NULL REFERENCES sessoes (id) ON DELETE CASCADE,
     papel      text NOT NULL CHECK (papel IN ('usuario', 'assistente')),
     conteudo   jsonb NOT NULL,
     criada_em  timestamptz NOT NULL DEFAULT now()

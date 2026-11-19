@@ -3,8 +3,8 @@
 from datetime import date, datetime, timezone
 
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
-from sabor.relatorio import gerar_relatorio, nome_arquivo_relatorio, relatorio_da_sessao
-from sabor.sessao import Mensagem, Sessao, criar_sessao, registrar_turno
+from sabor.agent.memoria import Mensagem, Sessao, criar_sessao, registrar_turno
+from sabor.ui.relatorio import gerar_relatorio, nome_arquivo_relatorio, relatorio_da_sessao
 
 INICIO = datetime(2026, 11, 18, 13, 5, tzinfo=timezone.utc)  # 10:05 em Recife
 
@@ -88,7 +88,7 @@ def test_relatorio_da_sessao_no_banco(conn_temporaria):
 
 def test_relatorio_da_conversa_lista_relatorios_gerados():
     from sabor.agent.schemas import Relatorio
-    from sabor.relatorio import _secao_turno
+    from sabor.ui.relatorio import _secao_turno
 
     resposta = RespostaTurno(
         sessao_id='s',

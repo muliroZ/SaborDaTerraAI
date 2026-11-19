@@ -24,16 +24,18 @@ scripts/
 src/sabor/
 ├── __init__.py              # `uv run sabor` abre a interface Streamlit
 ├── db.py                    # Adicionada role sabor_ro e função conectar_readonly()
-├── ui.py                    # Interface Streamlit: chat, trava de turno, seletor de usuário, fontes e rascunhos (#13)
-├── apresentacao.py          # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes (#13)
-├── sessao.py                # Sessões e mensagens no PostgreSQL + montagem do message_history (camada mínima de #31)
-├── relatorio.py             # Relatório Markdown somente leitura da conversa, sem LLM (#38)
+├── ui/                      # Interface Streamlit (#13)
+│   ├── app.py               # App: chat, trava de turno, seletor de usuário, fontes, flags, rascunhos e nova sessão
+│   ├── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
+│   └── relatorio.py         # Relatório Markdown somente leitura da conversa, sem LLM (#38)
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
-│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, resumir_produtor e gerar_relatorio
+│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido, resumir_produtor e gerar_relatorio
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
 │   ├── consultar_dados.py   # Ferramentas de consulta SQL read-only (#7)
 │   ├── documentos.py        # Ferramenta buscar_documentos com busca híbrida lexical + vetorial (#8)
+│   ├── pedidos.py           # Ferramenta extrair_e_classificar_pedido: extração estruturada e validação dia × data (#9)
 │   ├── relatorios.py        # Ferramenta gerar_relatorio: contas a receber, orgânicos vigentes e dossiê ADAGRO em Markdown (#15)
+│   ├── regras.py            # Motor de regras determinísticas de classificação de pedidos, urgência e elegibilidade (#10, reutilizável na #34)
 │   └── resumir_produtor.py  # Ferramenta resumir_produtor com vendas, pendências, pedidos elegíveis, alertas e rascunho (#11)
 ├── sql/
 │   └── schema.sql           # Criação idempotente da role sabor_ro (NOLOGIN, apenas SELECT)
@@ -44,28 +46,32 @@ src/sabor/
     ├── fallback.py          # Cadeia ModelFallback (Gemini -> Qwen3 -> Mistral), gatilhos e metadados reais (#37)
     ├── guardrails.py        # Guardrail de entrada determinístico: escopo, tamanho, prompt injection, cache hook e limites (Etapa 2)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)
+    ├── memoria.py           # Sessões e mensagens no PostgreSQL + message_history da sessão (camada mínima de #31)
     └── runner.py            # Fábrica criar_agente(), descoberta dinâmica de tools e processar_turno() (Etapas 1 a 5)
 
 tests/
 ├── conftest.py              # Fixture de banco temporário com schema vazio (sessões, UI e relatório)
 ├── test_schema.py           # Testes da role sabor_ro e bloqueio de INSERT/UPDATE/DELETE/DROP
-├── test_sessao.py           # Sessão ativa, memória dos últimos N turnos, isolamento por "Nova sessão" (#31)
-├── test_relatorio.py        # Relatório da conversa (#38)
-├── test_apresentacao.py     # Destaques de retorno antecipado, badges de flags e trecho/RBAC das fontes (#13)
-├── test_ui.py               # Interface com AppTest e agente simulado: turno, persistência, memória, trava (#13)
+├── ui/
+│   ├── test_app.py          # Interface com AppTest e agente simulado: turno, persistência, memória, trava (#13)
+│   ├── test_apresentacao.py # Destaques de retorno antecipado, badges de flags e trecho/RBAC das fontes (#13)
+│   └── test_relatorio.py    # Relatório da conversa (#38)
 ├── agent/
 │   ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
 │   ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
 │   ├── test_entry_guardrail.py # Testes do guardrail de entrada (20k chars, fora de escopo, injection, cota e UsageLimits)
 │   ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
 │   ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
+│   ├── test_memoria.py      # Sessão ativa, memória dos últimos N turnos, isolamento por "Nova sessão" (#31)
 │   └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
 └── tools/
     ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
     ├── test_consulta_dados.py   # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     ├── test_buscar_documentos.py # Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
-    ├── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
-    └── test_relatorios.py   # Relatórios sob demanda: valores, RBAC, dossiê PED-2026-014 e acervo indisponível (#15)
+    ├── test_pedidos.py          # Testes da extração estruturada, mascaramento PII antes do LLM e conflito dia × data (#9)
+    ├── test_relatorios.py       # Relatórios sob demanda: valores, RBAC, dossiê PED-2026-014, inventário e acervo indisponível (#15)
+    ├── test_regras_pedidos.py   # Testes parametrizados das 15 mensagens contra a matriz de pedidos.md e elegibilidade PNAE/SIE (#10)
+    └── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
 ```
 
 ---
@@ -130,9 +136,14 @@ Implementada com a capability oficial `ModelFallback` do PydanticAI `2.68.0`:
 - Erros de banco de dados (`psycopg.Error`) ou exceções de regra de negócio.
 
 ### Orçamento de Tempo e Falha Segura:
-- **Timeout por chamada de modelo (`TIMEOUT_POR_MODELO_S`):** `8.0s`.
-- **Timeout global do turno (`TIMEOUT_TURNO_S`):** `20.0s`.
-- Se todos os provedores da cadeia falharem (`FallbackExceptionGroup`) ou se o turno ultrapassar **20 segundos**, `processar_turno` captura a falha sem quebrar a aplicação e devolve `RespostaTurno(falha_segura=True, texto=MENSAGEM_FALHA_SEGURA, tentativas_fallback=...)`.
+- **Prazo por chamada de modelo (`TIMEOUT_POR_MODELO_S`, `.env`: `MODELO_TIMEOUT_S`):** `12.0s`, aplicado como `request_timeout` (prazo da requisição inteira, garantido pelo PydanticAI em qualquer modelo) e `timeout` (por tentativa), com `max_retries=0`. Ao estourar, o `ModelFallback` passa para o próximo modelo (`ModelRequestTimeout` é gatilho de fallback). Ajustes da `#49`:
+  - o `timeout` do cliente HTTP só limita a espera entre bytes; o OpenRouter manda keep-alives enquanto processa, e uma chamada ao Qwen chegou a ~35 s com `timeout=8`/`12`. Por isso o prazo total é `request_timeout`;
+  - sem `max_retries=0`, o cliente OpenAI-compatível repete cada requisição 2 vezes. Quem tenta de novo é a cadeia de fallback, trocando de provedor;
+  - em 18/11 o Gemini 3.5 Flash-Lite levou ~6–9 s por chamada, inclusive numa mensagem trivial, e o limite antigo de 8 s derrubava os turnos.
+- **Teto do turno (`TIMEOUT_TURNO_S`, `.env`: `TURNO_TIMEOUT_S`):** `20.0s` (`#37`). O prazo é aplicado dentro da thread do turno com `asyncio.wait_for`, que cancela a requisição em curso. Se a execução não encerrar logo (ex.: tool síncrona no meio de uma consulta), o turno devolve a falha segura em até `TIMEOUT_TURNO_S + FOLGA_ENCERRAMENTO_S` (1 s) sem esperar a thread.
+- **Conexão do turno:** `psycopg` não pega o lock em `close()`, então a conexão aberta pelo turno só é fechada quando livre (`_fechar_quando_livre`). Num turno abandonado, a consulta em andamento é cancelada no servidor (`cancel_safe`).
+- `criar_agente(timeout_s=...)` define o prazo de cada modelo; `processar_turno` não sobrescreve mais esse valor.
+- Se todos os provedores da cadeia falharem (`FallbackExceptionGroup`) ou se o turno ultrapassar o teto, `processar_turno` captura a falha sem quebrar a aplicação e devolve `RespostaTurno(falha_segura=True, texto=MENSAGEM_FALHA_SEGURA, tentativas_fallback=...)`.
 
 ---
 
@@ -170,6 +181,25 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Controle de acesso e privacidade:** Todas as consultas respeitam o perfil resolvido a partir de `ctx.deps.usuario` (`funcionario` vs. `produtor` restrito ao próprio `produtor_id`, lançando `SemPermissao` em tentativas de acesso a terceiros) e mascaram campos sensíveis via `ctx.deps.mascarador.mascarar(...)`.
 ### -----------------------------------------------------------------------------------------
 
+### ✅ Issues `#9` e `#10` — Extração Estruturada e Regras Determinísticas de Triagem de Pedidos (`src/sabor/tools/pedidos.py` e `regras.py`) — *Concluídas*
+- **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
+  - `extrair_e_classificar_pedido(ctx, *, pedido_id=None, texto=None) -> Pedido` — Recebe o ID de um pedido salvo na caixa de entrada (`PED-2026-001`…`015`) ou um texto colado diretamente no chat.
+- **Etapa 1 — Extração Estruturada e Data × Dia da Semana (`#9` — `pedidos.py`):**
+  - Mascara PII (`ctx.deps.mascarador.mascarar`) antes de enviar a mensagem ao subagente extrator (`output_type=Pedido`), ancorando datas relativas em `data_recebimento` (quando lido do banco) ou `ctx.deps.data_referencia`.
+  - Mapeia os nomes livres de produtos para o catálogo canônico via `_resolver_produto_id` e valida deterministicamente em `_validar_dia_e_data` conflitos entre data explícita e dia da semana (ex.: `PED-2026-001` e `PED-2026-002` → zera `entrega.data`, preenche `entrega.alerta` e adiciona `'data_inconsistente'`).
+- **Etapa 2 — Classificação Determinística em Python (`#10` — `regras.py`):**
+  - Executa `classificar_pedido_deterministico(pedido, conn=..., mensagem_original=..., data_referencia=..., data_global=...)` **100% em Python sobre o PostgreSQL** (sem delegar regras de negócio ao LLM e sem constantes *hardcoded* de IDs/datas):
+    - **Fora de safra (`fora_de_safra`):** Consulta `sazonalidade_mensal` no mês estimado da entrega (`nivel IN ('nenhuma', 'baixa')`).
+    - **Acima da capacidade (`acima_capacidade`):** Extrai dinamicamente a capacidade semanal dos `chunks` (`ficha` / `certificado`) e compara com o volume do item, o prazo de entrega ($\le 1$ dia exigindo $\ge 80\%$ da produção semanal ou carga concentrada $\ge 200\text{ kg}$ nos mesmos produtores) e a demanda agregada pendente na caixa de entrada.
+    - **Conformidade (`conformidade`):** Verifica no banco interdições em relatórios de `inspecao` da ADAGRO (`NC-001` no frango de `P017`), produtos de origem animal sem `registro_sie` (`P011`, `P017`) ou com SIE pendente em contrato público (`P018`), falta de `dap_caf` (`P006`, `P010`), certificação orgânica vencida ou a vencer até a data de entrega (`P008`, `P004` em jan/2027), solicitação de versão orgânica inexistente em `precos` (`preco_organico IS NULL` para banana/maracujá) e histórico de compras anteriores do cliente com produtor sem SIE.
+    - **Crédito / Inadimplência (`inadimplencia`, `credito`):** Soma faturas `status_pagamento = 'pendente'` com `data_vencimento < data_corte` na tabela `financeiro` (detectando `Rede SuperBom` e `PNAE`).
+    - **Privacidade (`privacidade`):** Sinaliza presença ou solicitação de CPF/RG, dados bancários (`IBAN`/`SWIFT`), chave PIX ou consulta de saldo financeiro pessoal.
+    - **Ambiguidade (`ambiguidade`):** Combina itens vagos/fora do catálogo (`len(candidatos) != 1` em `produtos`), conflito de data, referências temporais abertas (`"esse mês"`) e divergência entre o cargo declarado pelo signatário e o registrado no contrato do banco para o mesmo CPF.
+    - **Produtores elegíveis por item (`item.produtores_elegiveis`):** Filtra `produtor_produtos` mantendo apenas produtores ativos que atendem todas as restrições sanitárias (SIE/ADAGRO) e de certificação orgânica vigentes na data da entrega.
+    - **Urgência (`critica`, `alta`, `normal`, `baixa`):** Calculada por prazo relativo (`data_estimada - data_recebimento`) e natureza da mensagem, reproduzindo integralmente a matriz das 15 mensagens em `docs/pedidos.md`.
+  - **Reuso na Etapa 4a (`#34`):** As funções de `src/sabor/tools/regras.py` (`listar_produtores_elegiveis_item`, `verificar_inadimplencia_comprador`, `_produto_interditado_em_inspecao`) ficam disponíveis para o Guardrail de Saída.
+### -----------------------------------------------------------------------------------------
+
 ### ✅ Issue `#11` — Resumo Operacional e Financeiro do Produtor (`src/sabor/tools/resumir_produtor.py`) — *Concluída*
 - **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
   - `resumir_produtor(ctx, produtor)` — Aceita tanto o ID exato (`'P001'`) quanto o nome parcial/completo com ou sem acentos (`'Maria das Graças'`).
@@ -194,7 +224,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
-> **Camada mínima já entregue com a `#13`** em [`src/sabor/sessao.py`](../../src/sabor/sessao.py): tabelas `sessoes`/`mensagens`, `obter_ou_criar_sessao_ativa`, `registrar_turno` (5b, inclusive retorno antecipado e falha segura), `carregar_historico` (1, últimos `MEMORIA_MAX_TURNOS` turnos, padrão 6, só pergunta/resposta, PII mascarada, sem turnos barrados pelo guardrail) e `nova_sessao`. O agente passou a usar `instructions` em vez de `system_prompt`, porque o PydanticAI não reenvia o system prompt quando há `message_history`. Falta para fechar a `#31`: versão do dataset como hash da carga e alinhar a cardinalidade com a auditoria (`#35`).
+> **Camada mínima já entregue com a `#13`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens` (`sessao_id` em `text`, como em `auditoria_mensagens`), `obter_ou_criar_sessao_ativa`, `registrar_turno` (5b, inclusive retorno antecipado e falha segura), `carregar_historico` (1, últimos `MEMORIA_MAX_TURNOS` turnos, padrão 6, só pergunta/resposta, PII mascarada, sem turnos barrados pelo guardrail) e `nova_sessao`. O agente passou a usar `instructions` em vez de `system_prompt`, porque o PydanticAI não reenvia o system prompt quando há `message_history`. Falta para fechar a `#31`: versão do dataset como hash da carga e alinhar a cardinalidade com a auditoria (`#35`).
 
 - **Pontos de conexão no `processar_turno` ([`src/sabor/agent/runner.py`](../../src/sabor/agent/runner.py)):**
   1. **Etapa 1 (`carregar_memoria`):** Passar (ou conectar como padrão) uma função `(sessao_id: str) -> Sequence[ModelMessage]` que busca os últimos N turnos da sessão no banco.
@@ -209,7 +239,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
   2. **2b (Gancho de Cache Estático — `#36`):** Gera o hash SHA-256 normalizado (`dataset_version + pergunta`) e consulta `cache_repo.buscar_por_hash(...)` quando injetado em `processar_turno(..., cache_repo=...)`, devolvendo `RetornoAntecipado(motivo="CACHE_HIT")` com `bloqueado_guardrail=False`.
   3. **2c (Orçamento de Turno e Cota por Sessão):** Verifica o limite de requisições por sessão (`SESSAO_REQUEST_LIMIT`, padrão `50`) antes do LLM e injeta `UsageLimits(request_limit=..., total_tokens_limit=...)` no `agente.run_sync`. Caso ocorra `UsageLimitExceeded`, captura a exceção sem *stack trace* na UI e devolve `RetornoAntecipado(motivo="ORCAMENTO_TURNO_ESGOTADO")` sem afetar o turno seguinte.
   4. **Pós-processamento garantido:** Todos os retornos antecipados passam pelos hooks de auditoria (`#35`) e memória (`#31`).
-- **O que falta para a Etapa 4 (`pos_processar`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII para aplicar travas determinísticas de saída (ex.: bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
+- **O que falta para a Etapa 4 (`pos_processar` — `#34`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII, reaproveitando `src/sabor/tools/regras.py` (`#10`) para aplicar travas determinísticas de saída (bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
 
 ---
 
@@ -218,9 +248,9 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Como funciona:**
   - `AgentDeps.mascarador` cria uma instância de `Mascarador` por turno (com mapa `token -> valor` exclusivamente em memória).
   - Substitui CPF, RG, telefone, e-mail, banco, agência, conta corrente e chave PIX por tokens (`[CPF_1]`, `[RG_1]`, `[TEL_1]`, `[EMAIL_1]`, `[BANCO_1]`, `[AGENCIA_1]`, `[CONTA_1]`, `[PIX_1]`), aceitando formatos com e sem pontuação.
-  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, `#11` e futuras `#9`, `#12`).
+  - Mascara tanto a **mensagem do usuário antes do prompt** (ex.: `PED-2026-013` e `PED-2026-015`) quanto o retorno das ferramentas (`#7`, `#8`, `#11` e futura `#12`).
   - Na **Etapa 4c**, `_restaurar_pii_resposta()` restaura os tokens **exclusivamente em `resposta.texto`** (para o operador interno) e **nunca em `resposta.rascunhos`** (protegendo rascunhos destinados a terceiros conforme a LGPD).
-- **Como as futuras tools (`#9`, `#11`, `#12`) devem usar:**
+- **Como a futura tools (`#12`) devem usar:**
   - Basta chamar `ctx.deps.mascarador.mascarar(texto)` (ou `ctx.deps.mascarador.mascarar_campo(valor, 'PIX')`) antes de devolver qualquer string com dados de produtores/compradores.
 
 ---
@@ -234,13 +264,13 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 💬 Issue `#13` — Interface Streamlit (Chat, Trava de Turno, Seletor de Usuário e Fontes)
-- **Status: ✅ implementada** em [`src/sabor/ui.py`](../../src/sabor/ui.py) (rodar com `uv run sabor`).
-- **Fluxo do turno:** `st.chat_input` → `executar_turno()` → `processar_turno(sessao_id, mensagem, usuario, carregar_memoria=..., requisicoes_na_sessao=...)` → `sessao.registrar_turno()` → `st.rerun()`. O histórico exibido sai sempre de `mensagens` (banco), nunca de `st.session_state`.
+- **Status: ✅ implementada** em [`src/sabor/ui/app.py`](../../src/sabor/ui/app.py) (rodar com `uv run sabor`).
+- **Fluxo do turno:** `st.chat_input` → `executar_turno()` → `processar_turno(sessao_id, mensagem, usuario, carregar_memoria=..., salvar_memoria=..., requisicoes_na_sessao=...)` → `st.rerun()`. Os hooks das etapas 1 e 5b abrem e fecham conexões curtas: nenhuma conexão de escrita fica aberta durante a chamada ao modelo. O `processar_turno` chama `salvar_memoria` em todos os desfechos, inclusive falha segura. O histórico exibido sai sempre de `mensagens` (banco), nunca de `st.session_state`.
 - **Trava de turno:** o input e os botões ficam desabilitados enquanto o turno roda (`submit_mode='disable'` + flag `processando`) e há uma `threading.Lock` por `sessao_id` no processo, que impede dois turnos simultâneos na mesma sessão (ex.: duas abas).
 - **Seletor de usuário simulado:** `Dona Lúcia`, `Seu Antônio` (perfil funcionário) e `P001`…`P018` (perfil produtor), persistido em `?usuario=` na URL. Cada usuário tem a própria sessão ativa.
 - **Relatórios sob demanda (`#15`):** cada `turno.relatorios` vira um bloco com `st.download_button` (`.md`) e pré-visualização, também nas mensagens do histórico.
-- **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular, sem CPF/PIX/conta e respeitando o perfil), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
-- **Nova sessão:** diálogo com "Baixar relatório da conversa" (`relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
+- **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular; completo para a equipe interna, como o texto restaurado na etapa 4c, e com dados pessoais ocultos/mascarados e só os próprios registros para o perfil produtor), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
+- **Nova sessão:** diálogo com "Baixar relatório da conversa" (`ui/relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
 - **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos), status do banco e sugestões de perguntas da demo por perfil.
 
 ---
@@ -253,5 +283,5 @@ Conforme exigido no último item da Issue `#37` (*"Testar se os modelos de fallb
    - **Gemini 3.5 Flash-Lite (Primário):** Suporte nativo a *Structured Outputs* e *Tool Calling* com baixa latência.
    - **Qwen3 32B (Fallback 1 via OpenRouter):** Excelente capacidade de raciocínio e esclarecimento de ambiguidades (`13/15` nos testes de triagem e `3/3` em escolha de ferramenta), porém apresentou **1 saída com schema inválido** (`2/3` em decisão com fonte) e **latência superior a 10s em 4 de 21 chamadas**. Por isso:
      - Implementamos o `resposta_invalida_para_fallback` (Response Handler no `ModelFallback`) para rejeitar automaticamente respostas com schema quebrado e acionar o Fallback 2 (`Mistral Small 3.2`);
-     - Ajustamos o teto global do turno (`TIMEOUT_TURNO_S`) para **20 segundos** (`8s` por chamada individual), evitando que o Qwen3 32B sofra corte prematuro quando acionado.
+     - Ajustamos o teto global do turno (`TIMEOUT_TURNO_S`) para **20 segundos** (hoje `12s` de prazo total por chamada, ver `#49`), evitando que o Qwen3 32B sofra corte prematuro quando acionado.
    - **Mistral Small 3.2 (Fallback 2 via OpenRouter):** Latência muito baixa (`0/21` acima de 10s) e menor custo, mas menor rigor proativo em regras sanitárias sutis (ex.: não sinalizou sozinho a suspensão sanitária de `P017` sem apoio de regra determinística). Isso justifica a manutenção das travas determinísticas em código Python na Etapa 4 fora do prompt.

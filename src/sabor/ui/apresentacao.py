@@ -1,6 +1,6 @@
 """Regras de apresentação da interface Streamlit (#13), sem dependência do Streamlit.
 
-Fica separado de `ui.py` para ser testável: usuários simulados, sugestões da demo,
+Fica separado de `app.py` para ser testável: usuários simulados, sugestões da demo,
 destaque dos retornos antecipados, badges das flags e o trecho exibido para cada fonte.
 """
 
@@ -180,7 +180,10 @@ _TABELAS_FONTE: dict[str, tuple[str, str]] = {
 }
 """Arquivo tabular citado → (tabela, chave) para recuperar o registro."""
 
-_COLUNAS_OCULTAS = frozenset(
+_COLUNAS_INTERNAS = frozenset({'extracao', 'produto_id'})
+"""Colunas técnicas que não ajudam a ler a fonte."""
+
+_COLUNAS_PESSOAIS = frozenset(
     {
         'cpf',
         'data_nascimento',
@@ -192,11 +195,10 @@ _COLUNAS_OCULTAS = frozenset(
         'banco',
         'agencia',
         'conta_corrente',
-        'extracao',
-        'produto_id',
     }
 )
-"""Dados pessoais e colunas internas que não aparecem no trecho (LGPD, #33)."""
+"""Dados pessoais e bancários. A equipe interna pode vê-los (docs/README.md, LGPD), como já
+vê no texto da resposta restaurado na etapa 4c; para o perfil produtor ficam ocultos."""
 
 
 def _truncar(texto: str, limite: int = MAX_CHARS_TRECHO) -> str:
@@ -212,10 +214,11 @@ def _pode_ver(usuario_id: str, produtor_do_registro: str | None) -> bool:
     return produtor_do_registro == usuario.produtor_id
 
 
-def _formatar_registro(registro: Mapping[str, Any]) -> str:
+def _formatar_registro(registro: Mapping[str, Any], *, ocultar_pessoais: bool) -> str:
+    ocultas = _COLUNAS_INTERNAS | (_COLUNAS_PESSOAIS if ocultar_pessoais else frozenset())
     linhas = []
     for coluna, valor in registro.items():
-        if coluna in _COLUNAS_OCULTAS or valor is None or valor == [] or valor == '':
+        if coluna in ocultas or valor is None or valor == [] or valor == '':
             continue
         if isinstance(valor, bool):
             valor = 'sim' if valor else 'não'
@@ -259,12 +262,16 @@ def _trecho_tabular(conn: psycopg.Connection, fonte: Fonte, usuario_id: str) -> 
     dono = registro.get('produtor_id') or (registro.get('id') if tabela == 'produtores' else None)
     if not _pode_ver(usuario_id, dono):
         return None
-    return _formatar_registro(registro)
+    return _formatar_registro(registro, ocultar_pessoais=eh_produtor(usuario_id))
 
 
 def buscar_trecho(conn: psycopg.Connection, fonte: Fonte, usuario_id: str) -> str | None:
-    """Trecho do documento (chunk da seção) ou o registro tabular citado, com dados pessoais
-    mascarados. `None` quando não há trecho localizável ou o perfil não pode vê-lo."""
+    """Trecho do documento (chunk da seção) ou o registro tabular citado.
+
+    Segue a mesma regra do texto da resposta: a equipe interna vê os dados completos; para o
+    perfil produtor, dados pessoais são ocultados/mascarados (documentos e pedidos podem citar
+    terceiros). `None` quando não há trecho localizável ou o perfil não pode vê-lo.
+    """
     try:
         trecho = _trecho_tabular(conn, fonte, usuario_id)
         if trecho is None:
@@ -275,4 +282,6 @@ def buscar_trecho(conn: psycopg.Connection, fonte: Fonte, usuario_id: str) -> st
         return None
     if not trecho:
         return None
-    return _truncar(Mascarador().mascarar(trecho))
+    if eh_produtor(usuario_id):
+        trecho = Mascarador().mascarar(trecho)
+    return _truncar(trecho)

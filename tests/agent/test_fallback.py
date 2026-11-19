@@ -7,6 +7,7 @@ from pydantic_ai.exceptions import (
     FallbackExceptionGroup,
     ModelAPIError,
     ModelHTTPError,
+    ModelRequestTimeout,
     UnexpectedModelBehavior,
 )
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -51,6 +52,7 @@ def test_deve_fazer_fallback_excecao_gatilhos_e_nao_gatilhos():
     assert deve_fazer_fallback_excecao(ModelHTTPError(status_code=503, model_name='m')) is True
     assert deve_fazer_fallback_excecao(TimeoutError('tempo esgotado')) is True
     assert deve_fazer_fallback_excecao(httpx.ReadTimeout('read timeout')) is True
+    assert deve_fazer_fallback_excecao(ModelRequestTimeout('m', 12.0)) is True  # #49
     assert deve_fazer_fallback_excecao(httpx.ConnectError('falha de rede')) is True
     assert deve_fazer_fallback_excecao(UnexpectedModelBehavior('schema quebrado')) is True
 

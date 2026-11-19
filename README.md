@@ -25,7 +25,7 @@ uv run python scripts/ingest_docs.py # ingere documentos, gera embeddings, compl
 
 ```bash
 uv run python scripts/init_db.py  # cria também as tabelas `sessoes` e `mensagens`
-uv run sabor                      # abre http://localhost:8501 (equivale a `streamlit run src/sabor/ui.py`)
+uv run sabor                      # abre http://localhost:8501 (equivale a `streamlit run src/sabor/ui/app.py`)
 ```
 
 Escolha um usuário simulado na barra lateral (equipe da cooperativa ou produtor `P001`…`P018`) e converse pelo chat. A conversa fica no banco: recarregar a página retoma a sessão, e "Nova sessão" oferece o relatório da conversa anterior.

@@ -1,4 +1,4 @@
-"""Sessões de chat e memória no PostgreSQL (etapas 1 e 5b do Agent System, #31).
+"""Sessões de chat e memória da sessão no PostgreSQL (etapas 1 e 5b do Agent System, #31).
 
 Camada mínima usada pela interface (#13): a conversa vive nas tabelas `sessoes` e
 `mensagens`, não em `st.session_state`, então recarregar a página não perde a sessão ativa.
@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 from typing import Any, Literal
-import uuid
 
 from dotenv import load_dotenv
 import psycopg
@@ -79,10 +78,6 @@ def perfil_do_usuario(usuario_id: str) -> UserProfile:
     return _resolver_usuario(usuario_id).perfil
 
 
-def _uuid(sessao_id: str | uuid.UUID) -> uuid.UUID:
-    return sessao_id if isinstance(sessao_id, uuid.UUID) else uuid.UUID(str(sessao_id))
-
-
 _COLUNAS_SESSAO = """
     s.id, s.usuario_id, s.perfil, s.criada_em, s.encerrada_em,
     (SELECT count(*) FROM mensagens m WHERE m.sessao_id = s.id) AS total_mensagens
@@ -100,19 +95,22 @@ def _sessao(row: Sequence[Any]) -> Sessao:
     )
 
 
-def criar_sessao(conn: psycopg.Connection, usuario_id: str) -> Sessao:
+def criar_sessao(conn: psycopg.Connection, usuario_id: str, sessao_id: str | None = None) -> Sessao:
+    """Abre uma sessão. Sem `sessao_id`, o banco gera um UUID (em texto); qualquer string
+    é aceita, como no contrato `processar_turno(sessao_id: str)` e na auditoria (#35)."""
     with conn.transaction():
         row = conn.execute(
-            'INSERT INTO sessoes (usuario_id, perfil) VALUES (%s, %s) '
+            'INSERT INTO sessoes (id, usuario_id, perfil) '
+            'VALUES (coalesce(%s, gen_random_uuid()::text), %s, %s) '
             'RETURNING id, usuario_id, perfil, criada_em, encerrada_em, 0',
-            (usuario_id, perfil_do_usuario(usuario_id)),
+            (sessao_id, usuario_id, perfil_do_usuario(usuario_id)),
         ).fetchone()
     return _sessao(row)
 
 
 def obter_sessao(conn: psycopg.Connection, sessao_id: str) -> Sessao | None:
     row = conn.execute(
-        f'SELECT {_COLUNAS_SESSAO} FROM sessoes s WHERE s.id = %s', (_uuid(sessao_id),)
+        f'SELECT {_COLUNAS_SESSAO} FROM sessoes s WHERE s.id = %s', (sessao_id,)
     ).fetchone()
     return _sessao(row) if row else None
 
@@ -136,7 +134,7 @@ def encerrar_sessao(conn: psycopg.Connection, sessao_id: str) -> None:
     with conn.transaction():
         conn.execute(
             'UPDATE sessoes SET encerrada_em = now() WHERE id = %s AND encerrada_em IS NULL',
-            (_uuid(sessao_id),),
+            (sessao_id,),
         )
 
 
@@ -170,8 +168,8 @@ def registrar_turno(
             cur.executemany(
                 'INSERT INTO mensagens (sessao_id, papel, conteudo) VALUES (%s, %s, %s)',
                 [
-                    (_uuid(sessao_id), 'usuario', Jsonb({'texto': mensagem})),
-                    (_uuid(sessao_id), 'assistente', Jsonb(turno.model_dump(mode='json'))),
+                    (sessao_id, 'usuario', Jsonb({'texto': mensagem})),
+                    (sessao_id, 'assistente', Jsonb(turno.model_dump(mode='json'))),
                 ],
             )
 
@@ -187,7 +185,7 @@ def _mensagem(row: Sequence[Any]) -> Mensagem:
 def listar_mensagens(conn: psycopg.Connection, sessao_id: str) -> list[Mensagem]:
     rows = conn.execute(
         'SELECT id, papel, conteudo, criada_em FROM mensagens WHERE sessao_id = %s ORDER BY id',
-        (_uuid(sessao_id),),
+        (sessao_id,),
     ).fetchall()
     return [_mensagem(r) for r in rows]
 
@@ -196,7 +194,7 @@ def contar_turnos(conn: psycopg.Connection, sessao_id: str) -> int:
     """Quantidade de mensagens do usuário na sessão (base da cota por sessão do guardrail 2c)."""
     return conn.execute(
         "SELECT count(*) FROM mensagens WHERE sessao_id = %s AND papel = 'usuario'",
-        (_uuid(sessao_id),),
+        (sessao_id,),
     ).fetchone()[0]
 
 
