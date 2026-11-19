@@ -32,9 +32,11 @@ src/sabor/
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
 │   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido, resumir_produtor e gerar_relatorio
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
+│   ├── catalogo.py          # Mapeamento de nomes livres ao catálogo canônico (produtos + produto_sinonimos) (#9)
 │   ├── consultar_dados.py   # Ferramentas de consulta SQL read-only (#7)
+│   ├── datas.py             # Resolução determinística da data de entrega e conflito data × dia da semana (#9)
 │   ├── documentos.py        # Ferramenta buscar_documentos com busca híbrida lexical + vetorial (#8)
-│   ├── pedidos.py           # Ferramenta extrair_e_classificar_pedido: extração estruturada e validação dia × data (#9)
+│   ├── pedidos.py           # Ferramenta extrair_e_classificar_pedido: modelos, extração pelo LLM e normalização (#9)
 │   ├── relatorios.py        # Ferramenta gerar_relatorio: contas a receber, orgânicos vigentes e dossiê ADAGRO em Markdown (#15)
 │   ├── regras.py            # Motor de regras determinísticas de classificação de pedidos, urgência e elegibilidade (#10, reutilizável na #34)
 │   └── resumir_produtor.py  # Ferramenta resumir_produtor com vendas, pendências, pedidos elegíveis, alertas e rascunho (#11)
@@ -71,7 +73,9 @@ tests/
     ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
     ├── test_consulta_dados.py   # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     ├── test_buscar_documentos.py # Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
-    ├── test_pedidos.py          # Testes da extração estruturada, mascaramento PII antes do LLM e conflito dia × data (#9)
+    ├── test_pedidos.py          # Extração com modelo simulado sobre PED-001, 003, 005 e 011, schema, mascaramento e orçamento (#9)
+    ├── test_datas.py            # Datas relativas, intervalos, mês sem dia e conflito data × dia da semana (#9)
+    ├── test_catalogo.py         # Mapeamento ao catálogo sem adivinhar nomes ambíguos (#9)
     ├── test_relatorios.py       # Relatórios sob demanda: valores, RBAC, dossiê PED-2026-014, inventário e acervo indisponível (#15)
     ├── test_regras_pedidos.py   # Testes parametrizados das 15 mensagens contra a matriz de pedidos.md e elegibilidade PNAE/SIE (#10)
     └── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
@@ -187,18 +191,21 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 
 ### ✅ Issues `#9` e `#10` — Extração Estruturada e Regras Determinísticas de Triagem de Pedidos (`src/sabor/tools/pedidos.py` e `regras.py`) — *Concluídas*
 - **Ferramenta registrada no agente (`ctx: RunContext[AgentDeps]`):**
-  - `extrair_e_classificar_pedido(ctx, *, pedido_id=None, texto=None) -> Pedido` — Recebe o ID de um pedido salvo na caixa de entrada (`PED-2026-001`…`015`) ou um texto colado diretamente no chat.
-- **Etapa 1 — Extração Estruturada e Data × Dia da Semana (`#9` — `pedidos.py`):**
-  - Mascara PII (`ctx.deps.mascarador.mascarar`) antes de enviar a mensagem ao subagente extrator (`output_type=Pedido`), ancorando datas relativas em `data_recebimento` (quando lido do banco) ou `ctx.deps.data_referencia`.
-  - Mapeia os nomes livres de produtos para o catálogo canônico via `_resolver_produto_id` e valida deterministicamente em `_validar_dia_e_data` conflitos entre data explícita e dia da semana (ex.: `PED-2026-001` e `PED-2026-002` → zera `entrega.data`, preenche `entrega.alerta` e adiciona `'data_inconsistente'`).
+  - `extrair_e_classificar_pedido(ctx, pedido_id=None, texto=None) -> Pedido | str` — Recebe o ID de um pedido salvo na caixa de entrada (`PED-2026-001`…`015`, sem diferenciar maiúsculas) ou um texto colado no chat. ID inexistente ou entrada inválida voltam como texto para o modelo, sem derrubar o turno. A chamada ao LLM de extração soma no uso do turno (`usage=ctx.usage`, #32).
+- **Etapa 1 — Extração pelo LLM (`#9` — `pedidos.py`, `extrair_pedido`):**
+  - Mascara PII antes do envio e manda junto os nomes do catálogo. O modelo preenche só o que exige leitura: `tipo`, itens como escritos (`produto_texto`, `produto` da lista, quantidade, unidade, orgânico, opcional, `ambiguo`), comprador, pagamento e o trecho literal da data (`entrega.data_texto`).
+  - Campos calculados (`urgencia`, `sinalizacoes`, `pedido_id`, `entrega.data`/`data_fim`/`data_estimada`/`alerta`, `item.produto_id`/`produtores_elegiveis`) ficam fora do schema enviado ao modelo (`SkipJsonSchema`) e são descartados e refeitos em toda classificação.
+- **Etapa 1b — Normalização sem LLM (`#9` — `normalizar_pedido`, `datas.py`, `catalogo.py`):**
+  - `resolver_data` calcula a data a partir de `data_recebimento` (ou `deps.data_referencia` para texto colado): "hoje", "amanhã", dia da semana, datas explícitas, intervalos ("04 a 08 de novembro" → `data` e `data_fim`) e mês sem dia ("jan/2027" → só `data_estimada`). Se a expressão cita um dia da semana que não bate com a data (`PED-2026-001`, `PED-2026-002`), `data` fica vazia, `alerta` sugere a data mais próxima e entra `'data_inconsistente'`.
+  - `Catalogo.resolver` aceita só correspondência única (nome/sinônimo exato, nome contido no texto a partir da primeira palavra, ou nome que é o único a conter o texto). O que não resolve vira item ambíguo com `observacao`, mesmo que o modelo não tenha marcado (ex.: "manteiga" em `PED-2026-005`).
 - **Etapa 2 — Classificação Determinística em Python (`#10` — `regras.py`):**
-  - Executa `classificar_pedido_deterministico(pedido, conn=..., mensagem_original=..., data_referencia=..., data_global=...)` **100% em Python sobre o PostgreSQL** (sem delegar regras de negócio ao LLM e sem constantes *hardcoded* de IDs/datas):
+  - Executa `classificar_pedido(pedido, conn=..., mensagem_original=..., data_referencia=..., data_global=...)` **100% em Python sobre o PostgreSQL** (sem delegar regras de negócio ao LLM e sem constantes *hardcoded* de IDs/datas):
     - **Fora de safra (`fora_de_safra`):** Consulta `sazonalidade_mensal` no mês estimado da entrega (`nivel IN ('nenhuma', 'baixa')`).
     - **Acima da capacidade (`acima_capacidade`):** Extrai dinamicamente a capacidade semanal dos `chunks` (`ficha` / `certificado`) e compara com o volume do item, o prazo de entrega ($\le 1$ dia exigindo $\ge 80\%$ da produção semanal ou carga concentrada $\ge 200\text{ kg}$ nos mesmos produtores) e a demanda agregada pendente na caixa de entrada.
     - **Conformidade (`conformidade`):** Verifica no banco interdições em relatórios de `inspecao` da ADAGRO (`NC-001` no frango de `P017`), produtos de origem animal sem `registro_sie` (`P011`, `P017`) ou com SIE pendente em contrato público (`P018`), falta de `dap_caf` (`P006`, `P010`), certificação orgânica vencida ou a vencer até a data de entrega (`P008`, `P004` em jan/2027), solicitação de versão orgânica inexistente em `precos` (`preco_organico IS NULL` para banana/maracujá) e histórico de compras anteriores do cliente com produtor sem SIE.
     - **Crédito / Inadimplência (`inadimplencia`, `credito`):** Soma faturas `status_pagamento = 'pendente'` com `data_vencimento < data_corte` na tabela `financeiro` (detectando `Rede SuperBom` e `PNAE`).
     - **Privacidade (`privacidade`):** Sinaliza presença ou solicitação de CPF/RG, dados bancários (`IBAN`/`SWIFT`), chave PIX ou consulta de saldo financeiro pessoal.
-    - **Ambiguidade (`ambiguidade`):** Combina itens vagos/fora do catálogo (`len(candidatos) != 1` em `produtos`), conflito de data, referências temporais abertas (`"esse mês"`) e divergência entre o cargo declarado pelo signatário e o registrado no contrato do banco para o mesmo CPF.
+    - **Ambiguidade (`ambiguidade`):** Combina itens ambíguos (marcados pelo modelo ou pelo catálogo na Etapa 1b), conflito de data, referências temporais abertas (`"esse mês"`) e divergência entre o cargo declarado pelo signatário e o registrado no contrato do banco para o mesmo CPF.
     - **Produtores elegíveis por item (`item.produtores_elegiveis`):** Filtra `produtor_produtos` mantendo apenas produtores ativos que atendem todas as restrições sanitárias (SIE/ADAGRO) e de certificação orgânica vigentes na data da entrega.
     - **Urgência (`critica`, `alta`, `normal`, `baixa`):** Calculada por prazo relativo (`data_estimada - data_recebimento`) e natureza da mensagem, reproduzindo integralmente a matriz das 15 mensagens em `docs/pedidos.md`.
   - **Reuso na Etapa 4a (`#34`):** As funções de `src/sabor/tools/regras.py` (`listar_produtores_elegiveis_item`, `verificar_inadimplencia_comprador`, `_produto_interditado_em_inspecao`) ficam disponíveis para o Guardrail de Saída.
