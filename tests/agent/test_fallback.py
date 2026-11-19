@@ -598,11 +598,12 @@ def test_prepare_tools_oculta_gerar_relatorio_em_pergunta_simples():
         tools_vistas_pelo_modelo.append([t.name for t in info.function_tools])
         return ModelResponse(
             parts=[
-                TextPart(
-                    content=(
-                        'A SuperBom deve R$ 6.020,00 desde 18/09/2026 '
-                        '[financeiro.csv · FIN-2026-013].'
-                    )
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'A SuperBom deve R$ 6.020,00 desde 18/09/2026.',
+                        'fontes': [{'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-013'}],
+                    },
                 )
             ]
         )
@@ -648,3 +649,157 @@ def test_circuit_breaker_segue_apenas_cause_e_ignora_context():
 
 
 
+
+
+@pytest.mark.parametrize(
+    ('mensagem', 'anterior', 'esperado'),
+    [
+        ('Gere o relatório de contas a receber', None, True),
+        ('Gere um relatório de dívidas', None, True),
+        ('me dá um panorama da cooperativa', None, True),
+        ('quero um relatório de vendas do mês', None, True),
+        ('e agora o de orgânicos?', 'Gere o relatório de contas a receber', True),
+        ('gere um relatorio da maria das graças', None, False),
+        ('Gere um relatório do P003', None, False),
+        ('Quem a SuperBom está devendo e há quanto tempo?', None, False),
+        ('e agora o de orgânicos?', None, False),
+        ('e agora o de orgânicos?', 'Quem a SuperBom está devendo?', False),
+    ],
+)
+def test_mensagem_solicita_relatorio(mensagem, anterior, esperado):
+    from sabor.agent.fallback import mensagem_solicita_relatorio
+
+    assert mensagem_solicita_relatorio(mensagem, anterior) is esperado
+
+
+def _historico_com_retorno_de_tool(conteudo) -> list:
+    from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
+
+    return [
+        ModelRequest(parts=[UserPromptPart(content='Como está o lote?')]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name='listar_lotes', args={}, tool_call_id='abc123def')]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name='listar_lotes', content=conteudo, tool_call_id='abc123def'
+                )
+            ]
+        ),
+    ]
+
+
+def test_texto_livre_nao_le_ids_e_datas_entre_colchetes_como_fonte():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    historico = _historico_com_retorno_de_tool(
+        {'arquivo': 'lotes.csv', 'referencia': 'LOT-2026-0089'}
+    )
+    resposta = ModelResponse(
+        parts=[TextPart(content='O lote [LOT-2026-0089] foi entregue em [2026-10-30].')]
+    )
+    convertida = _normalizar_resposta_texto_livre(resposta, historico)
+
+    args = convertida.parts[0].args_as_dict()
+    assert args['fontes'] == [{'arquivo': 'lotes.csv', 'referencia': 'LOT-2026-0089'}]
+
+
+def test_texto_livre_aceita_citacao_com_hifen_e_extensao():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    historico = _historico_com_retorno_de_tool('ok')
+    resposta = ModelResponse(
+        parts=[TextPart(content='A SuperBom deve R$ 10 [financeiro.csv - FIN-2026-013].')]
+    )
+    args = _normalizar_resposta_texto_livre(resposta, historico).parts[0].args_as_dict()
+    assert args['fontes'] == [{'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-013'}]
+
+
+def test_texto_livre_sem_retorno_de_tool_nao_vira_resposta_final():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    resposta = ModelResponse(parts=[TextPart(content='A SuperBom deve R$ 10.')])
+    assert _normalizar_resposta_texto_livre(resposta, []) is resposta
+    assert resposta_invalida_para_fallback(resposta) is True
+
+
+def test_texto_livre_que_so_anuncia_o_proximo_passo_continua_rejeitado():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    historico = _historico_com_retorno_de_tool('ok')
+    resposta = ModelResponse(
+        parts=[TextPart(content='Vou consultar os dados financeiros agora.')]
+    )
+    assert _normalizar_resposta_texto_livre(resposta, historico) is resposta
+    assert resposta_invalida_para_fallback(resposta) is True
+
+
+def test_json_cercado_valido_vira_final_result_e_invalido_continua_rejeitado():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    valido = ModelResponse(
+        parts=[TextPart(content='```json\n{"texto": "oi", "fontes": []}\n```')]
+    )
+    convertida = _normalizar_resposta_texto_livre(valido, [])
+    assert convertida.parts[0].tool_name == 'final_result'
+    assert convertida.parts[0].args_as_dict()['texto'] == 'oi'
+
+    invalido = ModelResponse(parts=[TextPart(content='```json\n{"resposta": "oi"}\n```')])
+    historico = _historico_com_retorno_de_tool('ok')
+    assert _normalizar_resposta_texto_livre(invalido, historico) is invalido
+    assert resposta_invalida_para_fallback(invalido) is True
+
+
+def test_texto_livre_gera_tool_call_id_unico_e_aceito_pela_mistral():
+    from sabor.agent.fallback import _normalizar_resposta_texto_livre
+
+    historico = _historico_com_retorno_de_tool('ok')
+    ids = {
+        _normalizar_resposta_texto_livre(
+            ModelResponse(parts=[TextPart(content='A SuperBom deve R$ 10.')]), historico
+        ).parts[0].tool_call_id
+        for _ in range(5)
+    }
+    assert len(ids) == 5
+    assert all(len(i) == 9 and i.isalnum() for i in ids)
+
+
+def test_limpar_citacoes_remove_itens_vazios_do_bloco_fontes():
+    from sabor.agent.fallback import limpar_citacoes_inline_texto
+
+    bruto = (
+        'A SuperBom deve R$ 10.\n\nFontes:\n'
+        '- [financeiro.csv · FIN-1]\n- [financeiro.csv · FIN-2]'
+    )
+    assert limpar_citacoes_inline_texto(bruto) == 'A SuperBom deve R$ 10.'
+
+
+def test_prepare_tools_oferece_gerar_relatorio_em_continuacao_de_pedido():
+    tools_vistas_pelo_modelo: list[list[str]] = []
+
+    def consultar_financeiro(comprador: str) -> str:
+        return 'ok'
+
+    def gerar_relatorio(tipo: str) -> str:
+        return 'ok'
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        tools_vistas_pelo_modelo.append([t.name for t in info.function_tools])
+        return ModelResponse(
+            parts=[ToolCallPart(tool_name='final_result', args={'texto': 'Pronto.'})]
+        )
+
+    agente = Agent(
+        output_type=RespostaAgente,
+        tools=[consultar_financeiro, gerar_relatorio],
+        retries=0,
+        capabilities=[construir_capability_fallback([FunctionModel(fn_modelo)])],
+    )
+
+    primeiro = agente.run_sync('Gere o relatório de contas a receber')
+    agente.run_sync('e agora o de orgânicos?', message_history=primeiro.all_messages())
+    assert 'gerar_relatorio' in tools_vistas_pelo_modelo[-1]
+
+    agente.run_sync('e agora o de orgânicos?')
+    assert tools_vistas_pelo_modelo[-1] == ['consultar_financeiro']

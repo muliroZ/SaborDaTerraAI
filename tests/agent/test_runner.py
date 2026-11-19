@@ -883,3 +883,29 @@ def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
     assert any('4B_SEM_FONTE_FACTUAL' in r for r in turno.regras_disparadas)
     assert turno.fontes == []
     assert 'não encontrada' in turno.texto.lower()
+
+
+def test_anexar_relatorios_mantem_relatorio_quando_gerar_relatorio_rodou():
+    """Se `gerar_relatorio` rodou no turno, o anexo não é descartado (o texto o anuncia)."""
+    from sabor.agent.runner import _anexar_relatorios
+    from sabor.agent.schemas import RespostaAgente, Relatorio
+
+    def deps_com_relatorio() -> AgentDeps:
+        deps = AgentDeps(conn=MagicMock())
+        deps.relatorios.append(
+            Relatorio(
+                tipo='contas_a_receber',
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas a receber',
+            )
+        )
+        return deps
+
+    resposta = RespostaAgente(texto='O arquivo está disponível para baixar.')
+
+    mantida = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=True)
+    assert [r.nome_arquivo for r in mantida.relatorios] == ['contas_a_receber_20261030.md']
+
+    descartada = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=False)
+    assert descartada.relatorios == []

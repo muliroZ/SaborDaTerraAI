@@ -47,7 +47,6 @@ from sabor.agent.fallback import (
     extrair_tentativas_de_excecao,
     ler_segundos_env,
     limpar_citacoes_inline_texto,
-    mensagem_solicita_relatorio,
 )
 from sabor.agent.guardrail_entry import (
     criar_retorno_orcamento_turno,
@@ -185,7 +184,7 @@ def _anexar_relatorios(
     resposta: RespostaAgente,
     deps: AgentDeps,
     *,
-    mensagem_usuario: str | None = None,
+    gerar_relatorio_chamado: bool = True,
 ) -> RespostaAgente:
     """Etapa 4: anexa à resposta só os relatórios que as tools geraram no turno (#15).
 
@@ -193,8 +192,10 @@ def _anexar_relatorios(
     modelo mandasse no `final_result`. Por isso o campo é sempre sobrescrito com o que está em
     `deps.relatorios`: nenhum anexo vem do modelo.
 
-    Se a pergunta do usuário não solicitou relatório, levantamento ou dossiê, descarta
-    eventuais relatórios gerados por excesso de chamadas de ferramenta.
+    Quem decide se o relatório pode ser gerado é `FallbackComCircuitBreaker.prepare_tools`,
+    que só oferece `gerar_relatorio` quando a pergunta pede um. Aqui só se descartam
+    relatórios que apareçam sem `gerar_relatorio` ter rodado no turno; se a tool rodou, o
+    anexo é mantido, para a resposta não dizer que o arquivo está pronto sem entregá-lo.
 
     O Markdown passa pelo mascarador como rede de segurança (o arquivo pode sair da
     cooperativa, como o dossiê da ADAGRO) e, como os rascunhos, não tem a PII restaurada.
@@ -209,7 +210,7 @@ def _anexar_relatorios(
     if isinstance(lista, list):
         lista.clear()
 
-    if mensagem_usuario is not None and not mensagem_solicita_relatorio(mensagem_usuario):
+    if not gerar_relatorio_chamado:
         return resposta.model_copy(update={'relatorios': []})
 
     mascarar_fn = getattr(deps.mascarador, 'mascarar', None)
@@ -666,7 +667,11 @@ def processar_turno(
         resposta_final = _anexar_relatorios(
             resultado.output,
             deps_exec,
-            mensagem_usuario=mensagem_limpa,
+            gerar_relatorio_chamado=any(
+                isinstance(part, ToolCallPart) and part.tool_name == 'gerar_relatorio'
+                for msg in resultado.new_messages()
+                for part in getattr(msg, 'parts', ())
+            ),
         )
         resposta_final = _normalizar_fontes_e_texto_resposta(resposta_final)
         resposta_final = _restaurar_pii_resposta(resposta_final, deps_exec.mascarador)

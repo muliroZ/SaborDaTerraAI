@@ -7,7 +7,7 @@ Esta pasta concentra a documentação técnica de desenvolvimento, arquitetura i
 - **[Núcleo do Agente Único, Orquestração de Turno, Fallback (#37) e Mascaramento (#33)](agente_e_fallback.md)**
   - Estrutura modular do pacote `src/sabor/agent/` e conexão read-only (`sabor_ro`)
   - Fluxo completo do `processar_turno` (Etapas 1 a 5) e retornos antecipados
-  - Cadeia `ModelFallback` (`Gemini 3.5 Flash-Lite` → `Qwen3 32B` → `Mistral Small 3.2`) e falha segura (20s)
+  - Cadeia `ModelFallback` (`Gemini 3.5 Flash-Lite` → `Mistral Small 3.2` → `Qwen3 32B`) e falha segura (20s)
   - **Mapa de Pendências e Integração por Issue (`#9`, `#11`, `#12`, `#13`, `#31`, `#35`)**
   - Limitações conhecidas dos modelos de fallback para a apresentação de 10 minutos
 

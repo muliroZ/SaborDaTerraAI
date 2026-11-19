@@ -8,10 +8,12 @@ import logging
 import math
 import os
 import re
+import json
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 import unicodedata
+import uuid
 
 from dotenv import load_dotenv
 import httpx
@@ -162,7 +164,12 @@ def deve_fazer_fallback_excecao(exc: Exception) -> bool:
     return False
 
 
-_PADRAO_CITACAO_FONTE = re.compile(r'\[([^[\]·\n]+?)\s*(?:·|-)\s*([^[\]\n]+?)\]')
+# Citação `[arquivo · ref]` ou `[arquivo.ext - ref]`. O hífen só vale com espaços e com um
+# nome de arquivo com extensão, para não ler IDs (`[LOT-2026-0089]`) e datas como fontes.
+_PADRAO_CITACAO_FONTE = re.compile(
+    r'\[([^[\]·\n]+?)\s*·\s*([^[\]\n]+?)\]'
+    r'|\[([^[\]\s·]+\.[A-Za-z0-9]{2,5})\s+-\s+([^[\]\n]+?)\]'
+)
 _PADRAO_CITACAO_FONTE_PONTO = re.compile(r'\[([^[\]·\n]+?)\s*·\s*([^[\]\n]+?)\]')
 _PADRAO_LINHA_FONTES = re.compile(
     r'(?im)^[ \t]*(?:[-*]\s*)?\*{0,2}fontes?\*{0,2}\s*:.*(?:\n|$)'
@@ -211,11 +218,30 @@ _DOMINIOS_RELATORIO_COOPERATIVA = (
     'ped-014',
     'inspec',
     'comprador',
+    'divid',
+    'debito',
+    'devend',
+    'atrasad',
+    'pendenc',
+    'em aberto',
 )
 
 _PADRAO_RELATORIO_PRODUTOR = re.compile(
-    r'\b(?:da|do|de|produtor|produtora|sobre)\s+(?:p\d{3}\b|[a-z]{3,})'
+    r'\b(?:da|do|de|das|dos|produtor|produtora|sobre)\s+(p\d{3}\b|[a-z]{3,})'
 )
+
+# Palavras que podem vir depois de "de/da/do/sobre" num pedido de relatório sem indicar um
+# produtor específico ("relatório de vendas do mês", "panorama da cooperativa").
+_ALVOS_GENERICOS_RELATORIO = frozenset({
+    'cooperativa', 'vendas', 'venda', 'compras', 'pedidos', 'pedido', 'entregas', 'entrega',
+    'estoque', 'lotes', 'lote', 'producao', 'produtos', 'produtores', 'clientes',
+    'compradores', 'faturamento', 'receita', 'receitas', 'despesas', 'caixa', 'pagamentos',
+    'safra', 'tudo', 'todos', 'todas', 'geral', 'isso', 'isto', 'esse', 'essa', 'este',
+    'esta', 'uma', 'cada', 'hoje', 'ontem', 'agora', 'dia', 'semana', 'mes', 'ano',
+    'trimestre', 'semestre', 'periodo', 'ultimo', 'ultima', 'ultimos', 'ultimas',
+    'janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho', 'julho', 'agosto',
+    'setembro', 'outubro', 'novembro', 'dezembro',
+})
 
 
 def _normalizar_busca(texto: str) -> str:
@@ -225,22 +251,27 @@ def _normalizar_busca(texto: str) -> str:
     return sem_acentos.lower()
 
 
-def mensagem_solicita_relatorio(texto: str) -> bool:
+def mensagem_solicita_relatorio(texto: str, anterior: str | None = None) -> bool:
     """Indica se o pedido do usuário solicita explicitamente um dos relatórios da cooperativa.
 
     Pedidos de relatório sobre um produtor específico (ex.: "gere um relatório da Maria das
     Graças") sem menção a contas a receber, orgânicos vigentes ou ADAGRO devem ir para
     `resumir_produtor`, e não para `gerar_relatorio`.
+
+    `anterior` é a mensagem do turno anterior: uma continuação como "e agora o de orgânicos?"
+    conta como pedido de relatório se citar um domínio e o turno anterior tiver pedido um.
     """
     if not texto or not texto.strip():
         return False
     norm = _normalizar_busca(texto)
+    cita_dominio = any(dom in norm for dom in _DOMINIOS_RELATORIO_COOPERATIVA)
     if not any(termo in norm for termo in _TERMOS_SOLICITACAO_RELATORIO):
-        return False
-    if any(dom in norm for dom in _DOMINIOS_RELATORIO_COOPERATIVA):
+        return bool(anterior) and cita_dominio and mensagem_solicita_relatorio(anterior)
+    if cita_dominio:
         return True
-    if _PADRAO_RELATORIO_PRODUTOR.search(norm):
-        return False
+    for alvo in _PADRAO_RELATORIO_PRODUTOR.findall(norm):
+        if alvo not in _ALVOS_GENERICOS_RELATORIO:
+            return False
     return True
 
 
@@ -255,6 +286,8 @@ def limpar_citacoes_inline_texto(texto: str) -> str:
     limpo = _PADRAO_LINHA_FONTES.sub('', texto)
     limpo = _PADRAO_GRUPO_CITACOES_PARENTESES.sub('', limpo)
     limpo = _PADRAO_GRUPO_CITACOES_INLINE.sub('', limpo)
+    # Itens de lista que ficaram vazios depois de tirar as citações (ex.: bloco `Fontes:`).
+    limpo = re.sub(r'(?m)^[ \t]*[-*•][ \t]*(?:\n|$)', '', limpo)
     limpo = re.sub(r'[ \t]+([.,;:])', r'\1', limpo)
     limpo = re.sub(r'\n{3,}', '\n\n', limpo).strip()
     return limpo or texto.strip()
@@ -283,14 +316,58 @@ def _extrair_texto_usuario_turno(
         partes.extend(p for p in prompt_ctx if isinstance(p, str))
 
     for msg in msgs_turno:
-        if isinstance(msg, ModelRequest):
-            for part in msg.parts:
-                if isinstance(part, UserPromptPart):
-                    if isinstance(part.content, str):
-                        partes.append(part.content)
-                    elif isinstance(part.content, Sequence):
-                        partes.extend(c for c in part.content if isinstance(c, str))
+        partes.extend(_textos_prompt_usuario(msg))
     return ' '.join(partes)
+
+
+def _textos_prompt_usuario(msg: ModelMessage) -> list[str]:
+    """Textos dos `UserPromptPart` de uma mensagem (vazio se não for pedido do usuário)."""
+    partes: list[str] = []
+    if isinstance(msg, ModelRequest):
+        for part in msg.parts:
+            if isinstance(part, UserPromptPart):
+                if isinstance(part.content, str):
+                    partes.append(part.content)
+                elif isinstance(part.content, Sequence):
+                    partes.extend(c for c in part.content if isinstance(c, str))
+    return partes
+
+
+def _texto_usuario_turno_anterior(
+    mensagens: Sequence[ModelMessage],
+    msgs_turno: Sequence[ModelMessage],
+) -> str | None:
+    """Pergunta do usuário no turno anterior ao atual, se houver histórico."""
+    for msg in reversed(mensagens[: len(mensagens) - len(msgs_turno)]):
+        partes = _textos_prompt_usuario(msg)
+        if partes:
+            return ' '.join(partes)
+    return None
+
+
+def _turno_tem_retorno_de_tool(mensagens: Sequence[ModelMessage]) -> bool:
+    """Indica se alguma tool (fora `final_result`) já devolveu resultado no turno atual."""
+    return any(
+        isinstance(part, ToolReturnPart) and part.tool_name != 'final_result'
+        for msg in _mensagens_turno_atual(mensagens)
+        if isinstance(msg, ModelRequest)
+        for part in msg.parts
+    )
+
+
+_PADRAO_BLOCO_CODIGO = re.compile(r'^```[a-zA-Z]*[ \t]*\n?(.*?)\n?```$', re.DOTALL)
+
+# Textos que só anunciam o próximo passo ("Vou consultar os dados agora.") não são resposta.
+_PADRAO_TEXTO_STATUS = re.compile(
+    r'^(?:vou|irei|vamos|deixe-me|deixa eu|um momento|so um momento|aguarde|'
+    r'estou (?:consultando|verificando|buscando|analisando|levantando))\b'
+)
+_LIMITE_TEXTO_STATUS = 280
+
+
+def _novo_tool_call_id() -> str:
+    """ID de tool call aceito por todos os provedores (a Mistral exige 9 alfanuméricos)."""
+    return uuid.uuid4().hex[:9]
 
 
 def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) -> None:
@@ -329,8 +406,12 @@ def _normalizar_resposta_texto_livre(
     """Converte resposta final em texto Markdown puro (comum no Mistral/Qwen via OpenRouter
     após retorno de tools) em `ToolCallPart('final_result')`, extraindo as citações
     `[arquivo · referencia]` ou reaproveitando as fontes retornadas pelas tools no turno.
-    Strings que começam com `{` (JSON malformado) não são convertidas para continuarem sendo
-    rejeitadas por `resposta_invalida_para_fallback`.
+
+    Para o fallback continuar funcionando, o texto só é convertido depois que alguma tool
+    devolveu resultado no turno e se não for apenas um aviso do próximo passo ("Vou consultar
+    os dados agora."). JSON solto (`{...}`) não é convertido e segue sendo rejeitado por
+    `resposta_invalida_para_fallback`; JSON cercado por ```` ``` ```` é aproveitado se for uma
+    `RespostaAgente` válida e, se não for, também é rejeitado.
     """
     if not response.parts or any(isinstance(p, ToolCallPart) for p in response.parts):
         return response
@@ -339,14 +420,30 @@ def _normalizar_resposta_texto_livre(
     if not texto or texto.startswith('{'):
         return response
 
+    bloco = _PADRAO_BLOCO_CODIGO.match(texto)
+    if bloco:
+        conteudo = bloco.group(1).strip()
+        try:
+            RespostaAgente.model_validate_json(conteudo)
+        except ValidationError:
+            return response
+        return _resposta_com_final_result(response, json.loads(conteudo))
+
     try:
         RespostaAgente.model_validate_json(texto)
         return response
     except ValidationError:
         pass
 
+    if not _turno_tem_retorno_de_tool(mensagens_contexto):
+        return response
+    norm = _normalizar_busca(texto)
+    if len(texto) <= _LIMITE_TEXTO_STATUS and _PADRAO_TEXTO_STATUS.match(norm):
+        return response
+
     pares_fontes: list[tuple[str, str]] = [
-        (arq.strip(), ref.strip()) for arq, ref in _PADRAO_CITACAO_FONTE.findall(texto)
+        ((a or c).strip(), (b or d).strip())
+        for a, b, c, d in _PADRAO_CITACAO_FONTE.findall(texto)
     ]
     if not pares_fontes and mensagens_contexto:
         for msg in _mensagens_turno_atual(mensagens_contexto):
@@ -365,15 +462,23 @@ def _normalizar_resposta_texto_livre(
 
     texto_limpo = limpar_citacoes_inline_texto(texto)
 
-    nova_part = ToolCallPart(
-        tool_name='final_result',
-        args={
+    return _resposta_com_final_result(
+        response,
+        {
             'texto': texto_limpo,
             'fontes': fontes,
             'flags': [],
             'rascunhos': [],
         },
-        tool_call_id='final_result_text_fallback',
+    )
+
+
+def _resposta_com_final_result(response: ModelResponse, args: dict[str, Any]) -> ModelResponse:
+    """Troca as partes de texto da resposta por um `final_result` com `args`."""
+    nova_part = ToolCallPart(
+        tool_name='final_result',
+        args=args,
+        tool_call_id=_novo_tool_call_id(),
     )
     return ModelResponse(
         parts=[nova_part],
@@ -506,8 +611,8 @@ class _EstadoCircuitBreaker:
 class FallbackComCircuitBreaker(ModelFallback[Any]):
     """`ModelFallback` com circuit breaker (quarentena temporária por modelo com falha).
 
-    Mantém a ordem original do ADR (`Gemini -> Qwen -> Mistral`). Quando um modelo sofre
-    falha transitória (`429`, `5xx`, timeout ou erro de rede), entra em quarentena por
+    Mantém a ordem de `construir_modelos_padrao` (`Gemini -> Mistral -> Qwen`). Quando um
+    modelo sofre falha transitória (`429`, `5xx`, timeout ou erro de rede), entra em quarentena por
     `cooldown_s` segundos: os próximos passos do mesmo turno e as perguntas seguintes
     roteiam direto para o primeiro modelo saudável. Se todos estiverem em quarentena ou os
     saudáveis também falharem, os modelos em quarentena ainda são tentados como último recurso.
@@ -559,10 +664,20 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
         if len(tool_defs) <= 1:
             return tool_defs
 
-        msgs_turno = _mensagens_turno_atual(getattr(ctx, 'messages', ()) or ())
-        texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
+        mensagens = getattr(ctx, 'messages', ()) or ()
+        msgs_turno = _mensagens_turno_atual(mensagens)
+        ja_chamada = any(
+            isinstance(part, ToolCallPart) and part.tool_name == 'gerar_relatorio'
+            for msg in msgs_turno
+            if isinstance(msg, ModelResponse)
+            for part in msg.parts
+        )
+        if ja_chamada:
+            return tool_defs
 
-        if not mensagem_solicita_relatorio(texto_usuario):
+        texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
+        anterior = _texto_usuario_turno_anterior(mensagens, msgs_turno)
+        if not mensagem_solicita_relatorio(texto_usuario, anterior):
             return [t for t in tool_defs if t.name != 'gerar_relatorio']
 
         return tool_defs
