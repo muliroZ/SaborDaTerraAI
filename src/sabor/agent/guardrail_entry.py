@@ -4,14 +4,18 @@ Valida escopo, tamanho, prompt injection, extração de diretrizes, links e gibb
 
 from __future__ import annotations
 
-import hashlib
+import logging
 import os
 import re
+from datetime import date
 from typing import Any, Optional
 
 from dotenv import load_dotenv
 from pydantic_ai.usage import UsageLimits
+from sabor.agent.cache import gerar_chave_cache
 from sabor.agent.schemas import RetornoAntecipado
+
+logger = logging.getLogger(__name__)
 
 MENSAGEM_ESCOPO_AMIGAVEL = (
     "Olá! Sou o **CajAI**, assistente operacional da **Cooperativa Sabor da Terra**. "
@@ -89,12 +93,6 @@ def obter_usage_limits_turno() -> UsageLimits:
         request_limit=limites["turno_request_limit"],
         total_tokens_limit=limites["turno_tokens_limit"],
     )
-
-
-def gerar_hash_pergunta(texto: str, dataset_version: str) -> str:
-    normalizado = " ".join(texto.lower().strip().split())
-    chave = f"{dataset_version}:{normalizado}"
-    return hashlib.sha256(chave.encode("utf-8")).hexdigest()
 
 
 def _eh_gibberish(texto: str) -> bool:
@@ -187,18 +185,27 @@ def verificar_cache_estatico(
     texto: str,
     dataset_version: str,
     cache_repo: Optional[Any] = None,
+    *,
+    perfil: str = "funcionario",
+    data_referencia: date | str | None = None,
 ) -> Optional[RetornoAntecipado]:
-    """2b: Gancho para consulta por hash no cache UNLOGGED."""
+    """2b: consulta o cache UNLOGGED (#36) pela chave SHA-256 da pergunta normalizada,
+    perfil, versão do dataset e data de referência. Falha no cache não bloqueia o turno."""
     if cache_repo is None:
         return None
 
-    query_hash = gerar_hash_pergunta(texto, dataset_version)
-    hit = cache_repo.buscar_por_hash(query_hash)
+    chave = gerar_chave_cache(texto, perfil, dataset_version, data_referencia)
+    try:
+        hit = cache_repo.buscar_por_hash(chave)
+    except Exception:
+        logger.warning("Falha ao consultar o cache de respostas; seguindo sem cache", exc_info=True)
+        return None
     if hit:
         return RetornoAntecipado(
             motivo="CACHE_HIT",
             mensagem=hit.resposta,
-            fontes=getattr(hit, "fontes", []),
+            fontes=list(getattr(hit, "fontes", None) or []),
+            flags=list(getattr(hit, "flags", None) or []),
         )
     return None
 
@@ -230,13 +237,22 @@ def executar_guardrail_entrada(
     dataset_version: str = "default",
     requisicoes_na_sessao: int = 0,
     cache_repo: Optional[Any] = None,
+    *,
+    perfil: str = "funcionario",
+    data_referencia: date | str | None = None,
 ) -> Optional[RetornoAntecipado]:
     """Executa 2a -> 2b -> 2c em sequência. Retorna None se a entrada estiver liberada."""
     bloqueio = verificar_escopo_e_tamanho(mensagem)
     if bloqueio:
         return bloqueio
 
-    bloqueio = verificar_cache_estatico(mensagem, dataset_version, cache_repo)
+    bloqueio = verificar_cache_estatico(
+        mensagem,
+        dataset_version,
+        cache_repo,
+        perfil=perfil,
+        data_referencia=data_referencia,
+    )
     if bloqueio:
         return bloqueio
 

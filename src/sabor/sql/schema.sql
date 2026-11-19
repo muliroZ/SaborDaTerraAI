@@ -381,6 +381,33 @@ CREATE TABLE IF NOT EXISTS dataset_metadata (
 CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
 
+-- Turno respondido pelo cache de respostas estáticas, sem chamar o LLM (2b, #36).
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS cache_hit boolean NOT NULL DEFAULT false;
+
+-- ---------------------------------------------------------------------------
+-- Cache de respostas estáticas (etapas 2b e 5b — #36)
+-- ---------------------------------------------------------------------------
+-- UNLOGGED: sem WAL, mais rápida; o PostgreSQL esvazia a tabela após um crash, o que é
+-- aceitável para cache (decisão de 16/11, no lugar do Redis).
+-- `chave` = SHA-256 de pergunta normalizada + perfil + versão do dataset + data de
+-- referência: uma nova carga de dados publica outra versão e as chaves antigas deixam
+-- de ser encontradas (expiram pelo TTL, `CACHE_TTL_S`).
+-- Limpeza manual: `uv run python scripts/limpar_cache.py`.
+
+CREATE UNLOGGED TABLE IF NOT EXISTS cache_respostas (
+    chave      char(64) PRIMARY KEY,
+    resposta   jsonb NOT NULL,
+    criada_em  timestamptz NOT NULL DEFAULT now(),
+    expira_em  timestamptz NOT NULL,
+    hits       integer NOT NULL DEFAULT 0
+);
+
+COMMENT ON COLUMN cache_respostas.resposta IS
+    'Resposta servida no hit: {"resposta": texto, "fontes": [...], "flags": [...]}.';
+COMMENT ON COLUMN cache_respostas.hits IS 'Quantas vezes a resposta foi servida do cache.';
+
+CREATE INDEX IF NOT EXISTS cache_respostas_expira_idx ON cache_respostas (expira_em);
+
 -- ---------------------------------------------------------------------------
 -- Sessões de chat e mensagens (memória da sessão, etapas 1 e 5b — #31, #13)
 -- ---------------------------------------------------------------------------

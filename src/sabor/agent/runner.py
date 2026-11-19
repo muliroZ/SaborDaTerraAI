@@ -25,6 +25,14 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from sabor import tools as modulo_tools
+from sabor.agent.cache import (
+    PERFIS_CACHEAVEIS,
+    gerar_chave_cache,
+    gravar_no_cache,
+    pergunta_autocontida,
+    resposta_cacheavel,
+    versao_permite_cache,
+)
 from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
 from sabor.agent.fallback import (
     construir_capability_fallback,
@@ -48,6 +56,7 @@ from sabor.agent.schemas import (
     TentativaFallback,
 )
 from sabor.db import conectar_readonly
+from sabor.tools.base import _resolver_usuario
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +378,22 @@ def _extrair_fontes_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[s
     return fontes
 
 
+def _cache_aplicavel(
+    cache_repo: Any | None,
+    perfil: str,
+    dataset_version: str | None,
+    historico: Sequence[ModelMessage],
+    mensagem: str,
+) -> bool:
+    """2b/5b (#36): o cache só vale para a equipe, com versão do dataset conhecida e fora de
+    contexto multi-turno (primeira pergunta da sessão ou pergunta autocontida)."""
+    if cache_repo is None or perfil not in PERFIS_CACHEAVEIS:
+        return False
+    if not versao_permite_cache(dataset_version):
+        return False
+    return not historico or pergunta_autocontida(mensagem)
+
+
 def processar_turno(
     sessao_id: str,
     mensagem: str,
@@ -398,6 +423,9 @@ def processar_turno(
     )
     conn_propria = None
     dataset_ver = deps.dataset_version if deps is not None else None
+    perfil_turno = _resolver_usuario(usuario).perfil
+    data_ref_turno = deps.data_referencia if deps is not None else obter_data_referencia()
+    usar_cache = False
 
     # -----------------------------------------------------------------------
     # Etapa 2: Guardrail de entrada (retorno antecipado sem chamada LLM)
@@ -434,11 +462,16 @@ def processar_turno(
                 if requisicoes_na_sessao is not None
                 else _contar_turnos_historico(historico)
             )
+            usar_cache = _cache_aplicavel(
+                cache_repo, perfil_turno, dataset_ver, historico, mensagem_limpa
+            )
             retorno_antecipado = executar_guardrail_entrada(
                 mensagem=mensagem_limpa,
                 dataset_version=dataset_ver,
                 requisicoes_na_sessao=contagem_sessao,
-                cache_repo=cache_repo,
+                cache_repo=cache_repo if usar_cache else None,
+                perfil=perfil_turno,
+                data_referencia=data_ref_turno,
             )
 
         if retorno_antecipado is not None:
@@ -452,8 +485,10 @@ def processar_turno(
                 usuario=usuario,
                 texto=retorno_antecipado.mensagem,
                 fontes=list(retorno_antecipado.fontes),
+                flags=list(retorno_antecipado.flags),
                 bloqueado_guardrail=not eh_cache_hit,
                 retorno_antecipado=retorno_antecipado,
+                cache_hit=eh_cache_hit,
                 latencia_ms=latencia_ms,
             )
             if registrar_auditoria is not None:
@@ -481,7 +516,7 @@ def processar_turno(
             if deps is not None
             else AgentDeps(
                 conn=conn_propria,
-                data_referencia=obter_data_referencia(),
+                data_referencia=data_ref_turno,
                 usuario=usuario,
                 dataset_version=dataset_ver,
                 mascarador=Mascarador(),
@@ -652,5 +687,12 @@ def processar_turno(
             )
         else:
             salvar_memoria(sessao_id, mensagem_limpa, turno)
+
+    # -----------------------------------------------------------------------
+    # Etapa 5b: Atualizar o cache de respostas estáticas (#36)
+    # -----------------------------------------------------------------------
+    if usar_cache and resposta_cacheavel(turno, mensagem_limpa):
+        chave = gerar_chave_cache(mensagem_limpa, perfil_turno, dataset_ver, data_ref_turno)
+        gravar_no_cache(cache_repo, chave, turno)
 
     return turno

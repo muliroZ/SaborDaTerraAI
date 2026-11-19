@@ -102,6 +102,8 @@ class RetornoAntecipado(BaseModel):
     motivo: EarlyReturnList
     mensagem: str
     fontes: list[Fonte] = Field(default_factory=list)
+    flags: list[Flag] = Field(default_factory=list)
+    """Preenchido só no `CACHE_HIT`: as flags da resposta original guardada no cache (#36)."""
 
 class RespostaTurno(BaseModel):
     """Resultado completo de `processar_turno` para a interface (#13) e auditoria (#35)."""
@@ -115,6 +117,8 @@ class RespostaTurno(BaseModel):
     relatorios: list[Relatorio] = Field(default_factory=list)
     bloqueado_guardrail: bool = False
     retorno_antecipado: RetornoAntecipado | None = None
+    cache_hit: bool = False
+    """Resposta servida pelo cache de respostas estáticas, sem chamar o LLM (2b, #36)."""
     falha_segura: bool = False
     modelo_efetivo: str | None = None
     provedor_efetivo: str | None = None
