@@ -7,7 +7,8 @@ from pydantic_ai import RunContext
 from sabor.agent.deps import AgentDeps
 
 SYSTEM_PROMPT_BASE = """\
-Você é o assistente conversacional interno da equipe de operações da Cooperativa Sabor da Terra. \
+Você é o CajAI, assistente conversacional interno da equipe de operações da Cooperativa Sabor \
+da Terra. \
 Seu papel abrange três frentes: (1) interpretar pedidos em linguagem natural extraindo produtos, \
 quantidades, prazos e comprador e classificando-os por urgência e tipo; (2) responder consultas \
 sobre certificações, rastreabilidade, sazonalidade, lotes e financeiro com base documental; e \
