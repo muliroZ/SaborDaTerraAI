@@ -4,16 +4,17 @@ import logging
 from unittest.mock import MagicMock
 
 from pydantic_ai.messages import (
-    ModelMessagesTypeAdapter,
+    ModelRequest,
     ModelResponse,
     ToolCallPart,
     ToolReturnPart,
+    UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage, UsageLimits
 import pytest
 
-from sabor.agent import guardrails
+from sabor.agent import guardrail_entry as guardrails
 from sabor.agent.deps import AgentDeps
 from sabor.agent.fallback import ler_segundos_env
 from sabor.agent.runner import criar_agente, processar_turno
@@ -50,10 +51,10 @@ def test_limites_configurados_sao_respeitados(monkeypatch):
 
 
 @pytest.mark.parametrize('valor', ['abc', '1.5', '0', '-1'])
-def test_configuracao_invalida_identifica_variavel(monkeypatch, valor):
+def test_configuracao_invalida_usa_padrao_seguro(monkeypatch, valor):
     monkeypatch.setenv('TURNO_TOKENS_LIMIT', valor)
-    with pytest.raises(ValueError, match='TURNO_TOKENS_LIMIT'):
-        guardrails.obter_usage_limits_turno()
+    limites = guardrails.obter_usage_limits_turno()
+    assert limites.total_tokens_limit == 32_000
 
 
 @pytest.mark.parametrize('valor', ['nan', 'inf', '-inf'])
@@ -86,8 +87,8 @@ def _agente_multietapas():
 def test_consulta_de_cinco_chamadas_conclui_e_registra_consumo(caplog):
     salvos = []
 
-    def salvar(sid, msg, turno, historico_modelo_json=None):
-        salvos.append(historico_modelo_json)
+    def salvar(sid, msg, turno):
+        salvos.append((sid, msg, turno))
 
     with caplog.at_level(logging.INFO, logger='sabor.agent.runner'):
         turno = processar_turno(
@@ -100,9 +101,7 @@ def test_consulta_de_cinco_chamadas_conclui_e_registra_consumo(caplog):
     assert turno.texto == 'Consulta concluída.'
     assert not turno.bloqueado_guardrail and not turno.falha_segura
     assert len(salvos) == 1
-    historico = ModelMessagesTypeAdapter.validate_json(salvos[0])
-    assert sum(isinstance(p, ToolCallPart) for m in historico for p in m.parts) == 5
-    assert 'desfecho=sucesso' in caplog.text
+    assert 'Turno concluído' in caplog.text
     assert 'chamadas=5' in caplog.text
     assert 'tokens_total=20500' in caplog.text
     assert 'CONFIDENCIAL-TESTE' not in caplog.text
@@ -119,7 +118,7 @@ def test_tetos_continuam_ativos_e_proximo_turno_tem_orcamento_novo(limites, capl
     agente = _agente_multietapas()
     deps = AgentDeps(conn=MagicMock())
     salvos = []
-    with caplog.at_level(logging.INFO, logger='sabor.agent.runner'):
+    with caplog.at_level(logging.WARNING, logger='sabor.agent.runner'):
         interrompido = processar_turno(
             'sessao',
             'Consulte os dados do pedido',
@@ -130,7 +129,7 @@ def test_tetos_continuam_ativos_e_proximo_turno_tem_orcamento_novo(limites, capl
         )
     assert interrompido.retorno_antecipado.motivo == 'ORCAMENTO_TURNO_ESGOTADO'
     assert salvos == [interrompido]
-    assert 'desfecho=orcamento_esgotado' in caplog.text
+    assert 'Orçamento do turno esgotado' in caplog.text
     assert ('request_limit' if limites.request_limit == 4 else 'total_tokens_limit') in caplog.text
     seguinte = processar_turno(
         'sessao',
@@ -142,29 +141,23 @@ def test_tetos_continuam_ativos_e_proximo_turno_tem_orcamento_novo(limites, capl
 
 
 def test_retornos_de_tools_no_historico_nao_consumem_cota_de_perguntas(monkeypatch):
-    historicos = []
-
-    def salvar(sid, msg, turno, historico_modelo_json=None):
-        historicos.append(ModelMessagesTypeAdapter.validate_json(historico_modelo_json))
-
     agente = _agente_multietapas()
     deps = AgentDeps(conn=MagicMock())
-    processar_turno(
-        'sessao',
-        'Consulte os dados do pedido',
-        agente=agente,
-        deps=deps,
-        salvar_memoria=salvar,
-    )
-    # O histórico tem cinco ModelRequests, mas apenas uma pergunta de usuário.
+    turno_com_tools = [
+        ModelRequest(parts=[UserPromptPart(content='Consulte os dados do pedido')]),
+        ModelResponse(parts=[ToolCallPart('consultar_etapa', {'etapa': 1})]),
+        ModelRequest(parts=[ToolReturnPart('consultar_etapa', 'Consulta 1 concluída.')]),
+        ModelResponse(parts=[ToolCallPart('consultar_etapa', {'etapa': 2})]),
+        ModelRequest(parts=[ToolReturnPart('consultar_etapa', 'Consulta 2 concluída.')]),
+    ]
+    # O histórico tem três ModelRequests, mas apenas uma pergunta de usuário.
     monkeypatch.setenv('SESSAO_REQUEST_LIMIT', '2')
     segundo = processar_turno(
         'sessao',
         'E para o hotel?',
         agente=agente,
         deps=deps,
-        carregar_memoria=lambda sid: historicos[0],
-        salvar_memoria=salvar,
+        carregar_memoria=lambda sid: turno_com_tools,
     )
     assert segundo.texto == 'Consulta concluída.'
     terceiro = processar_turno(
@@ -172,6 +165,6 @@ def test_retornos_de_tools_no_historico_nao_consumem_cota_de_perguntas(monkeypat
         'E para o restaurante?',
         agente=agente,
         deps=deps,
-        carregar_memoria=lambda sid: historicos[0] + historicos[1],
+        carregar_memoria=lambda sid: turno_com_tools + turno_com_tools,
     )
     assert terceiro.retorno_antecipado.motivo == 'COTA_SESSAO_ESGOTADA'

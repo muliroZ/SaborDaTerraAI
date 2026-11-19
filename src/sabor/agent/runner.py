@@ -19,7 +19,7 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded
 )
-from pydantic_ai.messages import ModelMessage, ModelRequest
+from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
@@ -268,8 +268,13 @@ def _executar_com_prazo(
 
 
 def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
-    """Conta quantas requisições de usuário já ocorreram na sessão atual."""
-    return sum(1 for msg in historico if isinstance(msg, ModelRequest))
+    """Conta perguntas de usuário na sessão atual (ignora retornos de tools)."""
+    return sum(
+        1
+        for msg in historico
+        if isinstance(msg, ModelRequest)
+        and any(isinstance(part, UserPromptPart) for part in msg.parts)
+    )
 
 
 def processar_turno(

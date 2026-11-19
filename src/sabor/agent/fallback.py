@@ -1,6 +1,7 @@
 """Cadeia de modelos, capability `ModelFallback` e extração de metadados de auditoria (#37)."""
 
 from collections.abc import Sequence
+import math
 import os
 from typing import Any
 
@@ -61,8 +62,10 @@ def ler_segundos_env(variavel: str, padrao: float) -> float:
     except ValueError:
         mensagem = f'{variavel} deve ser um número de segundos, recebido {bruto!r}.'
         raise ValueError(mensagem) from None
-    if segundos <= 0:
-        raise ValueError(f'{variavel} deve ser maior que zero, recebido {bruto!r}.')
+    if not math.isfinite(segundos) or segundos <= 0:
+        raise ValueError(
+            f'{variavel} deve ser um número finito maior que zero, recebido {bruto!r}.'
+        )
     return segundos
 
 

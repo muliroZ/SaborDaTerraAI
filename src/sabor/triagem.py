@@ -44,7 +44,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sabor.agent.deps import AgentDeps
-from sabor.agent.guardrails import obter_limites_configurados
+from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.tools.pedidos import (
     MensagemPedido,
     Pedido,
@@ -96,8 +96,15 @@ class Orcamento:
     def configurado(cls) -> Orcamento:
         """Teto do lote em `TRIAGEM_TOKENS_LIMIT`; por pedido, os limites do turno (#32)."""
         limites = obter_limites_configurados()
+        bruto = (os.getenv('TRIAGEM_TOKENS_LIMIT') or '').strip()
+        try:
+            tokens_lote = int(bruto) if bruto else TOKENS_LOTE_PADRAO
+            if tokens_lote <= 0:
+                tokens_lote = TOKENS_LOTE_PADRAO
+        except ValueError:
+            tokens_lote = TOKENS_LOTE_PADRAO
         return cls(
-            tokens_lote=int(os.getenv('TRIAGEM_TOKENS_LIMIT') or TOKENS_LOTE_PADRAO),
+            tokens_lote=tokens_lote,
             tokens_pedido=limites['turno_tokens_limit'],
             requisicoes_pedido=limites['turno_request_limit'],
         )

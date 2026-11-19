@@ -291,8 +291,17 @@ def dialogo_relatorio(sessao_id: str) -> None:
 
 @st.dialog('Caixa de entrada', width='large')
 def dialogo_caixa_entrada() -> None:
-    with conectar_readonly(tentativas=1) as conn:
-        fila = triagem.listar_fila(conn)
+    try:
+        with conectar_readonly(tentativas=1) as conn:
+            fila = triagem.listar_fila(conn)
+    except psycopg.Error:
+        logger.exception('Falha ao consultar a fila da caixa de entrada')
+        st.warning(
+            'Não consegui carregar a caixa de entrada. Verifique se o banco está no ar e '
+            'se `uv run python scripts/init_db.py` foi executado.',
+            icon=':material/warning:',
+        )
+        return
     triados = [f for f in fila if f['situacao'] == 'ok']
     if not triados:
         st.info(
