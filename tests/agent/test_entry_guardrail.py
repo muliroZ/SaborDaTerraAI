@@ -1,12 +1,15 @@
 from unittest.mock import MagicMock
+import logging
 
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import UsageLimits
 
+from sabor.agent import guardrail_entry
 from sabor.agent.deps import AgentDeps
 from sabor.agent.guardrail_entry import (
     executar_guardrail_entrada,
+    obter_usage_limits_turno,
     verificar_cota_sessao,
 )
 from sabor.agent.runner import processar_turno
@@ -152,3 +155,47 @@ def test_estouro_orcamento_turno_devolve_aviso_e_turno_seguinte_funciona():
     assert turno_seguinte.retorno_antecipado is None
     assert isinstance(turno_seguinte.texto, str)
     assert len(turno_seguinte.texto) > 0
+
+
+def test_limites_padrao_turno_e_sobrescrita_env(monkeypatch):
+    """Padrões de orçamento comportam múltiplos tool calls (8 chamadas / 32k tokens)."""
+    monkeypatch.setattr(guardrail_entry, "load_dotenv", lambda: None)
+    for var in ("TURNO_REQUEST_LIMIT", "TURNO_TOKENS_LIMIT", "SESSAO_REQUEST_LIMIT"):
+        monkeypatch.delenv(var, raising=False)
+
+    limites_padrao = obter_usage_limits_turno()
+    assert limites_padrao.request_limit == 8
+    assert limites_padrao.total_tokens_limit == 32_000
+
+    monkeypatch.setenv("TURNO_REQUEST_LIMIT", "10")
+    monkeypatch.setenv("TURNO_TOKENS_LIMIT", "40000")
+    limites_custom = obter_usage_limits_turno()
+    assert limites_custom.request_limit == 10
+    assert limites_custom.total_tokens_limit == 40_000
+
+    # Valores inválidos ou não-positivos caem no padrão seguro
+    monkeypatch.setenv("TURNO_REQUEST_LIMIT", "0")
+    monkeypatch.setenv("TURNO_TOKENS_LIMIT", "-500")
+    limites_fallback = obter_usage_limits_turno()
+    assert limites_fallback.request_limit == 8
+    assert limites_fallback.total_tokens_limit == 32_000
+
+
+def test_estouro_orcamento_registra_motivo_em_log(caplog):
+    """Estouro de UsageLimits deve registrar o motivo exato em log para diagnóstico."""
+    agente_teste = _criar_agente_teste()
+    deps_mock = _criar_deps_mock()
+
+    with caplog.at_level(logging.WARNING, logger="sabor.agent.runner"):
+        turno = processar_turno(
+            sessao_id="sessao-log-limite",
+            mensagem="Quem a SuperBom está devendo?",
+            agente=agente_teste,
+            deps=deps_mock,
+            usage_limits=UsageLimits(request_limit=0),
+        )
+
+    assert turno.retorno_antecipado is not None
+    assert turno.retorno_antecipado.motivo == "ORCAMENTO_TURNO_ESGOTADO"
+    assert "Orçamento do turno esgotado" in caplog.text
+    assert "request_limit" in caplog.text

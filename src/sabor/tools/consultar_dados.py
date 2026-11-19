@@ -60,18 +60,21 @@ class ProdutorResultado(BaseModel):
 def buscar_produtores(
     ctx: RunContext[AgentDeps],
     *,
+    produtor_id: str | None = None,
+    nome: str | None = None,
     produto: str | None = None,
     municipio: str | None = None,
     organico: bool | None = None,
     ativo: bool | None = None,
 ) -> list[ProdutorResultado]:
-    """Busca produtores por produto/categoria, município, orgânico e status."""
+    """Busca produtores por ID, nome, produto/categoria, município, orgânico e status."""
     conn = ctx.deps.conn
     usuario = _resolver_usuario(ctx.deps.usuario)
     data_referencia = ctx.deps.data_referencia
     mascarador = ctx.deps.mascarador
 
-    produtor_id_filtro = _aplicar_filtro_produtor(usuario, None)
+    produtor_id_norm = produtor_id.strip().upper() if produtor_id and produtor_id.strip() else None
+    produtor_id_filtro = _aplicar_filtro_produtor(usuario, produtor_id_norm)
 
     condicoes: list[str] = []
     parametros: list[object] = []
@@ -79,6 +82,10 @@ def buscar_produtores(
     if produtor_id_filtro is not None:
         condicoes.append('p.id = %s')
         parametros.append(produtor_id_filtro)
+
+    if nome is not None and nome.strip():
+        condicoes.append('p.nome_completo ILIKE %s')
+        parametros.append(f'%{nome.strip()}%')
 
     if municipio is not None:
         condicoes.append('p.municipio ILIKE %s')
@@ -189,6 +196,7 @@ class ItemFinanceiro(BaseModel):
     id_transacao: str
     data: date
     produtor_id: str
+    produtor_nome: str | None = None
     comprador: str
     produto: str
     quantidade: float
@@ -197,6 +205,7 @@ class ItemFinanceiro(BaseModel):
     valor_total: float
     status_pagamento: Literal['pago', 'pendente']
     vencido: bool
+    dias_atraso: int = 0
     data_vencimento: date | None
     data_pagamento: date | None
     alerta_divergencia: bool
@@ -222,7 +231,7 @@ def consultar_financeiro(
     status: Literal['pago', 'pendente', 'vencido'] | None = None,
     apenas_divergentes: bool = False,
 ) -> ResumoFinanceiro:
-    """Consulta vendas, pendências e vencidos em relação à data de referência."""
+    """Consulta vendas, pendências e vencidos (já inclui nome do produtor e dias de atraso)."""
     conn = ctx.deps.conn
     usuario = _resolver_usuario(ctx.deps.usuario)
     data_referencia = ctx.deps.data_referencia
@@ -263,8 +272,9 @@ def consultar_financeiro(
                COALESCE(f.comprador_normalizado, f.comprador),
                f.produto, f.quantidade, f.unidade, f.valor_unitario, f.valor_total,
                f.status_pagamento, f.data_vencimento, f.data_pagamento,
-               f.alerta_divergencia, f.chave_pix_deposito
+               f.alerta_divergencia, f.chave_pix_deposito, p.nome_completo
         FROM financeiro f
+        JOIN produtores p ON p.id = f.produtor_id
         {where_sql}
         ORDER BY f.data
         """,
@@ -272,28 +282,32 @@ def consultar_financeiro(
     ).fetchall()
 
     itens: list[ItemFinanceiro] = []
-    for (
-        idt,
-        data_,
-        pid,
-        comp,
-        prod,
-        qtd,
-        uni,
-        vu,
-        vt,
-        status_pg,
-        venc,
-        pago_em,
-        divergencia,
-        pix_dep,
-    ) in linhas:
+    for row in linhas:
+        (
+            idt,
+            data_,
+            pid,
+            comp,
+            prod,
+            qtd,
+            uni,
+            vu,
+            vt,
+            status_pg,
+            venc,
+            pago_em,
+            divergencia,
+            pix_dep,
+        ) = row[:14]
+        pnome = row[14] if len(row) > 14 else None
         vencido = status_pg == 'pendente' and venc is not None and venc < data_referencia
+        dias_atraso = (data_referencia - venc).days if vencido and venc is not None else 0
         itens.append(
             ItemFinanceiro(
                 id_transacao=idt,
                 data=data_,
                 produtor_id=pid,
+                produtor_nome=pnome,
                 comprador=comp,
                 produto=prod,
                 quantidade=float(qtd),
@@ -302,6 +316,7 @@ def consultar_financeiro(
                 valor_total=float(vt),
                 status_pagamento=status_pg,
                 vencido=vencido,
+                dias_atraso=dias_atraso,
                 data_vencimento=venc,
                 data_pagamento=pago_em,
                 alerta_divergencia=bool(divergencia),

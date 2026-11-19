@@ -88,6 +88,11 @@ def _verificar_regra_4a_sanitaria(
 
     return False, None
 
+def _normalizar_fonte(texto: str) -> str:
+    """Normaliza citação de fonte ignorando separadores visuais (ex.: '·' e espaços extras)."""
+    return ' '.join(_norm(texto).replace('·', ' ').split())
+
+
 def _verificar_regra_4b_fontes(
     resposta: RespostaAgente,
     fontes_retornadas_no_turno: list[str],
@@ -102,9 +107,9 @@ def _verificar_regra_4b_fontes(
     if not resposta.fontes:
         return True, "Afirmação factual sem citação de fontes"
 
-    fontes_turn_norm = {_norm(f) for f in fontes_retornadas_no_turno}
+    fontes_turn_norm = {_normalizar_fonte(f) for f in fontes_retornadas_no_turno}
     for f_resp in resposta.fontes:
-        chave_resp = _norm(f"{f_resp.arquivo} {f_resp.referencia}")
+        chave_resp = _normalizar_fonte(f"{f_resp.arquivo} {f_resp.referencia}")
         if fontes_turn_norm and not any(f_t in chave_resp or chave_resp in f_t for f_t in fontes_turn_norm):
             return True, f"Fonte citada não verificada nas ferramentas do turno: {f_resp.arquivo}"
 
