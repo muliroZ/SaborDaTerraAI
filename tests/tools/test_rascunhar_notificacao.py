@@ -93,6 +93,9 @@ class _ConexaoPsycopgFalsa:
         if "from produto_sinonimos" in sql_norm:
             return _CursorFalso([])
 
+        if sql_norm == "select id, nome from produtos":
+            return _CursorFalso([(pid, nome) for pid, nome, _orig in self._produtos.values()])
+
         if "select nome from produtos where id =" in sql_norm:
             prod_id = params[0]
             for pid, nome, _orig in self._produtos.values():

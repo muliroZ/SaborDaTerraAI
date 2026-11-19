@@ -55,7 +55,7 @@ from sabor.tools.pedidos import (
 
 logger = logging.getLogger(__name__)
 
-VERSAO_TRIAGEM = '2'
+VERSAO_TRIAGEM = '3'
 """Suba quando o prompt de extração mudar: força nova chamada ao LLM para todos os pedidos.
 Mudanças nas regras (#10) não precisam disso: elas rodam de novo a cada lote."""
 

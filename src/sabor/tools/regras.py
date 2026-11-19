@@ -6,37 +6,13 @@ from __future__ import annotations
 
 from datetime import date
 import re
-import unicodedata
 from typing import TYPE_CHECKING, Any
 
-from sabor.tools.base import _resolver_produto_id
+from sabor.tools.catalogo import Catalogo
+from sabor.tools.datas import normalizar as _norm
 
 if TYPE_CHECKING:
     from sabor.tools.pedidos import Item, Pedido
-
-_MESES_PT = {
-    'jan': 1, 'janeiro': 1,
-    'fev': 2, 'fevereiro': 2,
-    'mar': 3, 'marco': 3,
-    'abr': 4, 'abril': 4,
-    'mai': 5, 'maio': 5,
-    'jun': 6, 'junho': 6,
-    'jul': 7, 'julho': 7,
-    'ago': 8, 'agosto': 8,
-    'set': 9, 'setembro': 9,
-    'out': 10, 'outubro': 10,
-    'nov': 11, 'novembro': 11,
-    'dez': 12, 'dezembro': 12,
-}
-
-
-def _norm(texto: str | None) -> str:
-    """Remove acentos e converte para minúsculas."""
-    if not texto:
-        return ''
-    return ''.join(
-        c for c in unicodedata.normalize('NFKD', texto.lower()) if not unicodedata.combining(c)
-    )
 
 
 def _adicionar_sinalizacao(pedido: Pedido, flag: str) -> None:
@@ -47,42 +23,6 @@ def _adicionar_sinalizacao(pedido: Pedido, flag: str) -> None:
 def _conn_eh_real(conn: Any) -> bool:
     """Retorna True apenas se `conn` for uma conexão real do psycopg (ignora MagicMock)."""
     return conn is not None and type(conn).__module__.startswith('psycopg')
-
-
-def _estimar_data_entrega(pedido: Pedido, mensagem_original: str, data_base: date) -> date | None:
-    """Estima a data pretendida de entrega mesmo quando entrega.data foi anulada por conflito de dia da semana."""
-    if pedido.entrega.data is not None:
-        return pedido.entrega.data
-
-    from sabor.tools.pedidos import _parse_data
-
-    for candidato in (pedido.entrega.data_texto, mensagem_original):
-        if not candidato:
-            continue
-
-        c_norm = _norm(candidato)
-        m_mes_ano = re.search(
-            r'\b(jan(?:eiro)?|fev(?:ereiro)?|mar(?:co)?|abr(?:il)?|mai(?:o)?|jun(?:ho)?|'
-            r'jul(?:ho)?|ago(?:sto)?|set(?:embro)?|out(?:ubro)?|nov(?:embro)?|dez(?:embro)?)'
-            r'(?:\s+de\s+|\s*/\s*|\s+)(20\d{2})\b',
-            c_norm,
-        )
-        if m_mes_ano:
-            mes_num = _MESES_PT[m_mes_ano.group(1)]
-            ano_num = int(m_mes_ano.group(2))
-            return date(ano_num, mes_num, 15)
-
-        texto_limpo = re.sub(
-            r'\b(\d{1,2})\s*(?:a|ate|-)\s*\d{1,2}([/-](?:\d{1,2}|[a-zA-ZçÇ]{3,})(?:[/-]\d{2,4})?)\b',
-            r'\1\2',
-            candidato,
-            flags=re.IGNORECASE,
-        )
-        parsed = _parse_data(texto_limpo, data_base)
-        if parsed is not None:
-            return parsed
-
-    return None
 
 
 def _produto_interditado_em_inspecao(conn: Any, nome_produto: str, produtor_id: str | None = None) -> bool:
@@ -373,12 +313,19 @@ def classificar_pedido(
     data_referencia: date,
     data_global: date | None = None,
 ) -> Pedido:
-    """Aplica as regras determinísticas da Issue #10 consultando dinamicamente o PostgreSQL."""
+    """Aplica as regras determinísticas da Issue #10 consultando dinamicamente o PostgreSQL.
+
+    Espera o pedido já normalizado por `sabor.tools.pedidos.normalizar_pedido` (data de entrega
+    resolvida e itens mapeados ao catálogo). Itens sem `produto_id` e não ambíguos, como os de
+    triagens gravadas antes disso, ainda são buscados no catálogo.
+    """
     data_corte = data_global or date(2026, 10, 30)
     texto_norm = _norm(mensagem_original)
     comprador_norm = _norm(pedido.comprador.nome)
 
-    data_estimada = _estimar_data_entrega(pedido, mensagem_original, data_referencia)
+    # Datas resolvidas antes, por `normalizar_pedido` (#9); `data` fica vazia quando conflita
+    # com o dia da semana, mas a estimativa ainda vale para prazo e safra.
+    data_estimada = pedido.entrega.data or pedido.entrega.data_estimada
     mes_entrega = data_estimada.month if data_estimada else data_referencia.month
     data_validade_ref = data_estimada or data_corte
     dias_ate_entrega = (data_estimada - data_referencia).days if data_estimada else None
@@ -400,49 +347,21 @@ def classificar_pedido(
     )
 
     # =========================================================================
-    # 1. AMBIGUIDADE E RESOLUÇÃO CANÔNICA DE PRODUTOS NO CATÁLOGO
+    # 1. AMBIGUIDADE (itens já mapeados ao catálogo por `normalizar_pedido`, #9)
     # =========================================================================
     if 'data_inconsistente' in pedido.sinalizacoes or pedido.entrega.alerta:
         _adicionar_sinalizacao(pedido, 'ambiguidade')
+    if any(item.ambiguo for item in pedido.itens):
+        _adicionar_sinalizacao(pedido, 'ambiguidade')
 
-    ids_produtos_itens: list[int | None] = []
-    for item in pedido.itens:
-        if item.ambiguo:
-            _adicionar_sinalizacao(pedido, 'ambiguidade')
-            ids_produtos_itens.append(None)
-            continue
-
-        if _conn_eh_real(conn) and (item.produto or item.produto_texto):
-            prod_id = _resolver_produto_id(conn, item.produto or item.produto_texto)
-            if prod_id is None and item.produto and item.produto_texto:
-                prod_id = _resolver_produto_id(conn, item.produto_texto)
-
-            if prod_id is None:
-                texto_item_norm = _norm(f'{item.produto_texto} {item.produto or ""}')
-                palavras_chave = [
-                    p for p in re.findall(r'[a-z]{4,}', texto_item_norm)
-                    if p not in {'galinha', 'variadas', 'variado', 'ultima', 'sempre'}
-                ]
-                for palavra in palavras_chave:
-                    candidatos = conn.execute(
-                        'SELECT id, nome FROM produtos WHERE nome ILIKE %s',
-                        (f'%{palavra}%',),
-                    ).fetchall()
-                    if len(candidatos) == 1:
-                        prod_id = candidatos[0][0]
-                        break
-
-            if prod_id is None:
-                item.ambiguo = True
-                _adicionar_sinalizacao(pedido, 'ambiguidade')
-                ids_produtos_itens.append(None)
-            else:
-                row_nome = conn.execute('SELECT nome FROM produtos WHERE id = %s', (prod_id,)).fetchone()
-                if row_nome:
-                    item.produto = row_nome[0]
-                ids_produtos_itens.append(prod_id)
-        else:
-            ids_produtos_itens.append(None)
+    # Compatibilidade: itens sem `produto_id` (triagens gravadas antes da normalização ou
+    # pedidos montados à mão) são buscados no catálogo, sem marcar ambiguidade aqui.
+    sem_id = [i for i in pedido.itens if i.produto_id is None and not i.ambiguo]
+    if sem_id and _conn_eh_real(conn):
+        catalogo = Catalogo.carregar(conn)
+        for item in sem_id:
+            if (produto := catalogo.resolver(item.produto, item.produto_texto)) is not None:
+                item.produto_id = produto.id
 
     # 1b. Referência temporal relativa aberta ("esse mês", "este mês") em consulta ou pedido
     if (
@@ -482,7 +401,8 @@ def classificar_pedido(
     # =========================================================================
     carga_por_produtor_elegivel: dict[str, float] = {}
 
-    for item, prod_id in zip(pedido.itens, ids_produtos_itens):
+    for item in pedido.itens:
+        prod_id = item.produto_id
         nome_busca = (item.produto or item.produto_texto or '').strip()
 
         elegiveis, bloqueios_item = listar_produtores_elegiveis_item(
