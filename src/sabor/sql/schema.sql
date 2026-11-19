@@ -371,6 +371,13 @@ CREATE TABLE IF NOT EXISTS auditoria_mensagens (
     criado_em           timestamptz NOT NULL DEFAULT now()
 );
 
+-- Versão do dataset publicada ao fim do ETL/ingestão; lida pelo cache da Etapa 2.
+CREATE TABLE IF NOT EXISTS dataset_metadata (
+    chave          text PRIMARY KEY,
+    versao         text NOT NULL,
+    atualizada_em  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
 

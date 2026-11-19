@@ -13,7 +13,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.usage import RequestUsage, UsageLimits
 import pytest
 
-from sabor.agent import guardrails
+from sabor.agent import guardrail_entry as guardrails
 from sabor.agent.deps import AgentDeps
 from sabor.agent.fallback import ler_segundos_env
 from sabor.agent.runner import criar_agente, processar_turno
@@ -49,11 +49,17 @@ def test_limites_configurados_sao_respeitados(monkeypatch):
     assert limites.total_tokens_limit == 24_000
 
 
-@pytest.mark.parametrize('valor', ['abc', '1.5', '0', '-1'])
+@pytest.mark.parametrize('valor', ['abc', '1.5'])
 def test_configuracao_invalida_identifica_variavel(monkeypatch, valor):
     monkeypatch.setenv('TURNO_TOKENS_LIMIT', valor)
     with pytest.raises(ValueError, match='TURNO_TOKENS_LIMIT'):
         guardrails.obter_usage_limits_turno()
+
+
+@pytest.mark.parametrize('valor', ['0', '-1'])
+def test_limites_nao_positivos_usam_padrao_seguro(monkeypatch, valor):
+    monkeypatch.setenv('TURNO_TOKENS_LIMIT', valor)
+    assert guardrails.obter_usage_limits_turno().total_tokens_limit == 32_000
 
 
 @pytest.mark.parametrize('valor', ['nan', 'inf', '-inf'])

@@ -44,7 +44,7 @@ from pydantic_ai.exceptions import (
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sabor.agent.deps import AgentDeps
-from sabor.agent.guardrails import obter_limites_configurados
+from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.tools.pedidos import (
     MensagemPedido,
     Pedido,

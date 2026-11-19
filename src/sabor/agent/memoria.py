@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 import os
+import os
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -248,6 +249,28 @@ def montar_historico(
                 pass  # Registros inválidos/antigos usam o fallback textual abaixo.
         historico.append(ModelRequest(parts=[UserPromptPart(content=mascarar(usuario_msg.texto))]))
         historico.append(ModelResponse(parts=[TextPart(content=mascarar(assistente_msg.texto))]))
+
+    # Reserve metade do orçamento do turno para a mensagem atual, tools e resposta.
+    # Se o histórico completo crescer demais, descarte turnos antigos inteiros para
+    # preservar o pareamento de chamadas/retornos de tools.
+    try:
+        limite_turno = max(1, int(os.getenv('TURNO_TOKENS_LIMIT', '32000')))
+    except ValueError:
+        limite_turno = 32000
+    limite_historico_bytes = limite_turno * 2  # estimativa conservadora: ~4 bytes/token
+    while historico and len(ModelMessagesTypeAdapter.dump_json(historico)) > limite_historico_bytes:
+        proximo_turno = next(
+            (
+                i for i, msg in enumerate(historico[1:], start=1)
+                if isinstance(msg, ModelRequest)
+                and any(isinstance(part, UserPromptPart) for part in msg.parts)
+            ),
+            None,
+        )
+        if proximo_turno is None:
+            historico = []
+            break
+        historico = historico[proximo_turno:]
     return historico
 
 

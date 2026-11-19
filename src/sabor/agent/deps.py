@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from datetime import date
 import hashlib
 import os
-import time
 from typing import Any
 
 from dotenv import load_dotenv
@@ -29,29 +28,8 @@ _TABELAS_DATASET = (
     'sazonalidade', 'sazonalidade_mensal', 'pedidos', 'pedido_itens', 'financeiro',
     'lotes', 'documentos',
 )
-_CACHE_VERSAO_DATASET: dict[tuple[str, str, str, str], tuple[float, str]] = {}
-
-
-def obter_versao_dataset(conn: Any) -> str:
-    """Fingerprint estável do conteúdo operacional/documental carregado no PostgreSQL.
-
-    `DATASET_VERSION` pode fixar uma versão publicada. Sem override, hashes por tabela
-    são combinados; conteúdo e PII nunca são retornados, apenas o SHA-256 final.
-    """
-    from dotenv import load_dotenv
-
-    load_dotenv()
-    if valor := os.getenv('DATASET_VERSION'):
-        return valor.strip()
-    info = getattr(conn, 'info', None)
-    chave_cache = tuple(
-        str(getattr(info, campo, '')) for campo in ('host', 'port', 'dbname', 'user')
-    )
-    agora = time.monotonic()
-    if all(chave_cache) and chave_cache in _CACHE_VERSAO_DATASET:
-        instante, versao = _CACHE_VERSAO_DATASET[chave_cache]
-        if agora - instante < 60:
-            return versao
+def _calcular_versao_dataset(conn: Any) -> str:
+    """Calcula o fingerprint completo. Chamado ao fim das cargas, não por turno."""
     digest = hashlib.sha256()
     try:
         for tabela in _TABELAS_DATASET:
@@ -72,12 +50,53 @@ def obter_versao_dataset(conn: Any) -> str:
         digest.update((hash_chunks or '').encode())
     except Exception:
         # Conexões mockadas e bancos indisponíveis preservam a execução de teste; em produção,
-        # o runner cria a dependência com conexão antes de avaliar o guardrail.
+        # o runner mantém uma versão de fallback. Psycopg deixa a transação abortada após erro.
+        rollback = getattr(conn, 'rollback', None)
+        if callable(rollback):
+            try:
+                rollback()
+            except Exception:
+                pass
         return 'sha256-unavailable'
-    versao = f'sha256:{digest.hexdigest()}'
-    if all(chave_cache):
-        _CACHE_VERSAO_DATASET[chave_cache] = (agora, versao)
+    return f'sha256:{digest.hexdigest()}'
+
+
+def atualizar_versao_dataset(conn: Any) -> str:
+    """Calcula e persiste a versão depois de uma carga bem-sucedida do dataset."""
+    versao = _calcular_versao_dataset(conn)
+    if versao == 'sha256-unavailable':
+        raise RuntimeError('Não foi possível calcular a versão do dataset; versão não atualizada.')
+    conn.execute(
+        "INSERT INTO dataset_metadata (chave, versao) VALUES ('atual', %s) "
+        'ON CONFLICT (chave) DO UPDATE SET versao = EXCLUDED.versao, atualizada_em = now()',
+        (versao,),
+    )
     return versao
+
+
+def obter_versao_dataset(conn: Any) -> str:
+    """Lê a versão persistida; `DATASET_VERSION` pode sobrescrevê-la explicitamente."""
+    load_dotenv()
+    if valor := os.getenv('DATASET_VERSION'):
+        return valor.strip()
+    info = getattr(conn, 'info', None)
+    if not isinstance(getattr(info, 'dbname', None), str):
+        return 'sha256-unavailable'
+    try:
+        row = conn.execute(
+            "SELECT versao FROM dataset_metadata WHERE chave = 'atual'"
+        ).fetchone()
+        if row is not None:
+            return row[0]
+    except Exception:
+        rollback = getattr(conn, 'rollback', None)
+        if callable(rollback):
+            try:
+                rollback()
+            except Exception:
+                pass
+        return 'sha256-unavailable'
+    return 'sha256-unpublished'
 
 
 class MascaradorNoOp:
@@ -96,6 +115,6 @@ class AgentDeps:
 
     conn: psycopg.Connection
     data_referencia: date = field(default_factory=obter_data_referencia)
-    dataset_version: str | None = 'v1'
+    dataset_version: str | None = None
     usuario: str = 'Dona Lúcia'
     mascarador: Any = field(default_factory=Mascarador)

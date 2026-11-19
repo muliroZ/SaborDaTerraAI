@@ -146,11 +146,14 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
             erro_persistencia = True
             raise
 
-    def salvar_memoria(sid: str, msg: str, turno: RespostaTurno) -> None:  # Etapa 5b
+    def salvar_memoria(
+        sid: str, msg: str, turno: RespostaTurno,
+        historico_modelo_json: str | None = None,
+    ) -> None:  # Etapa 5b
         nonlocal gravado, erro_persistencia
         try:
             with conexao() as conn:
-                sess.registrar_turno(conn, sid, msg, turno)
+                sess.registrar_turno(conn, sid, msg, turno, historico_modelo_json)
         except psycopg.Error:
             erro_persistencia = True
             raise
@@ -402,7 +405,7 @@ def render_sidebar_sessao(sessao: sess.Sessao, processando: bool) -> None:
 
         st.divider()
         st.markdown(f'**Data de referência:** {obter_data_referencia():%d/%m/%Y}')
-        versao = DATASET_VERSION
+        versao = DATASET_VERSION or 'hash calculado por carga'
         if status and status['assinatura']:
             versao += f' · docs {status["assinatura"]}'
         st.markdown(f'**Dataset:** `{versao}`')

@@ -34,7 +34,7 @@ def test_timeout_padrao_turno_e_20_segundos():
     assert TIMEOUT_TURNO_S == 20.0
 
 
-def test_processar_turno_fluxo_completo_etapas_1_a_5(monkeypatch):
+def test_processar_turno_fluxo_completo_etapas_1_a_5():
     etapas_executadas: list[str] = []
 
     def fn_memoria(sessao_id: str):
@@ -52,7 +52,7 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5(monkeypatch):
                 ToolCallPart(
                     tool_name='final_result',
                     args={
-                        'texto': 'O CPF de P001 é [CPF_MASCARADO].',
+                        'texto': 'Produtor P001 (CPF [CPF_MASCARADO]) vendeu R$ 1.090,00.',
                         'fontes': [{'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-001'}],
                         'flags': [],
                         'rascunhos': [
@@ -74,12 +74,6 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5(monkeypatch):
         etapas_executadas.append(f'5b_salvar_memoria:{sessao_id}')
 
     agente = criar_agente([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)])
-    # Este teste cobre orquestração e restauração de PII. O guardrail de saída tem
-    # testes próprios em test_exit_guardrail.py e recebe fontes reais de tools.
-    monkeypatch.setattr(
-        'sabor.agent.runner.processar_guardrail_saida',
-        lambda resposta, **_kwargs: (resposta, []),
-    )
     deps = AgentDeps(
         conn=MagicMock(),
         usuario='Dona Lúcia',
