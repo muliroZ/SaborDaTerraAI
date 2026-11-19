@@ -35,10 +35,13 @@ from sabor.agent.cache import (
 )
 from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
 from sabor.agent.fallback import (
+    _PADRAO_CITACAO_FONTE_PONTO,
     construir_capability_fallback,
     extrair_metadados_resposta,
     extrair_tentativas_de_excecao,
     ler_segundos_env,
+    limpar_citacoes_inline_texto,
+    mensagem_solicita_relatorio,
 )
 from sabor.agent.guardrail_entry import (
     criar_retorno_orcamento_turno,
@@ -49,6 +52,7 @@ from sabor.agent.guardrail_exit import processar_guardrail_saida
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
+    Fonte,
     Relatorio,
     RespostaAgente,
     RespostaTurno,
@@ -164,19 +168,27 @@ def criar_agente(
         output_type=RespostaAgente,
         instructions=SYSTEM_PROMPT_BASE,
         tools=ferramentas_ativas,
-        retries=0,
+        retries=1,
         capabilities=[capability_fallback],
     )
     agente.instructions(instrucoes_contexto_turno)
     return agente
 
 
-def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAgente:
+def _anexar_relatorios(
+    resposta: RespostaAgente,
+    deps: AgentDeps,
+    *,
+    mensagem_usuario: str | None = None,
+) -> RespostaAgente:
     """Etapa 4: anexa à resposta só os relatórios que as tools geraram no turno (#15).
 
     `relatorios` fica fora do schema do LLM, mas o Pydantic ainda validaria um valor que o
     modelo mandasse no `final_result`. Por isso o campo é sempre sobrescrito com o que está em
     `deps.relatorios`: nenhum anexo vem do modelo.
+
+    Se a pergunta do usuário não solicitou relatório, levantamento ou dossiê, descarta
+    eventuais relatórios gerados por excesso de chamadas de ferramenta.
 
     O Markdown passa pelo mascarador como rede de segurança (o arquivo pode sair da
     cooperativa, como o dossiê da ADAGRO) e, como os rascunhos, não tem a PII restaurada.
@@ -191,6 +203,9 @@ def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAge
     if isinstance(lista, list):
         lista.clear()
 
+    if mensagem_usuario is not None and not mensagem_solicita_relatorio(mensagem_usuario):
+        return resposta.model_copy(update={'relatorios': []})
+
     mascarar_fn = getattr(deps.mascarador, 'mascarar', None)
     por_arquivo: dict[str, Relatorio] = {}
     for relatorio in gerados:
@@ -198,6 +213,23 @@ def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAge
             relatorio = relatorio.model_copy(update={'markdown': mascarar_fn(relatorio.markdown)})
         por_arquivo[relatorio.nome_arquivo] = relatorio
     return resposta.model_copy(update={'relatorios': list(por_arquivo.values())})
+
+
+def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAgente:
+    """Move citações `[arquivo · ref]` do texto para `fontes` e limpa blocos `Fontes:`."""
+    if not resposta.texto:
+        return resposta
+
+    fontes_atuais = list(resposta.fontes)
+    vistas = {(f.arquivo.strip(), f.referencia.strip()) for f in fontes_atuais}
+    for arq, ref in _PADRAO_CITACAO_FONTE_PONTO.findall(resposta.texto):
+        chave = (arq.strip(), ref.strip())
+        if chave[0] and chave[1] and chave not in vistas:
+            vistas.add(chave)
+            fontes_atuais.append(Fonte(arquivo=chave[0], referencia=chave[1]))
+
+    texto_limpo = limpar_citacoes_inline_texto(resposta.texto)
+    return resposta.model_copy(update={'texto': texto_limpo, 'fontes': fontes_atuais})
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
@@ -605,7 +637,12 @@ def processar_turno(
     # Etapa 4: Pós-processamento e restauração de PII para o operador (#33)
     # -----------------------------------------------------------------------
     try:
-        resposta_final = _anexar_relatorios(resultado.output, deps_exec)
+        resposta_final = _anexar_relatorios(
+            resultado.output,
+            deps_exec,
+            mensagem_usuario=mensagem_limpa,
+        )
+        resposta_final = _normalizar_fontes_e_texto_resposta(resposta_final)
         resposta_final = _restaurar_pii_resposta(resposta_final, deps_exec.mascarador)
 
         # Limpa eventual transação abortada antes das consultas read-only do guardrail de saída.

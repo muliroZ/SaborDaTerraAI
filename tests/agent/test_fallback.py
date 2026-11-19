@@ -277,13 +277,17 @@ def test_qwen_desabilita_reasoning_preservando_timeout():
         openrouter_api_key='fake-openrouter',
         timeout_s=15.0,
     )
-    qwen = modelos[1]
-    assert qwen.model_name == MODELO_FALLBACK_1
+    qwen = modelos[2]
+    assert qwen.model_name == MODELO_FALLBACK_2
     assert qwen.settings is not None
     assert qwen.settings.get('timeout') == 15.0
     assert qwen.settings.get('request_timeout') == 15.0
     assert qwen.settings.get('max_retries') == 0
-    assert qwen.settings.get('extra_body') == {'reasoning': {'enabled': False}}
+    assert qwen.settings.get('extra_body') == {
+        'reasoning': {'enabled': False, 'effort': 'none'},
+        'tool_choice': 'auto',
+        'provider': {'ignore': ['Tenstorrent']},
+    }
 
 
 def test_obter_cooldown_circuit_breaker_env(monkeypatch):
@@ -614,8 +618,19 @@ def test_prepare_tools_oculta_gerar_relatorio_em_pergunta_simples():
     agente.run_sync('Quem a SuperBom está devendo e há quanto tempo?')
     assert tools_vistas_pelo_modelo[-1] == ['consultar_financeiro']
 
+    agente.run_sync('gere um relatorio da maria das graças')
+    assert tools_vistas_pelo_modelo[-1] == ['consultar_financeiro']
+
     agente.run_sync('Gere o relatório de contas a receber')
     assert 'gerar_relatorio' in tools_vistas_pelo_modelo[-1]
+
+
+def test_limpar_citacoes_inline_remove_crases_e_conforme():
+    from sabor.agent.fallback import limpar_citacoes_inline_texto
+
+    bruto = 'Queijo coalho vencido há 12 dias, conforme `[financeiro.csv · FIN-2026-013]`.'
+    assert limpar_citacoes_inline_texto(bruto) == 'Queijo coalho vencido há 12 dias.'
+
 
 
 

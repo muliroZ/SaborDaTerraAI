@@ -54,11 +54,11 @@ logger = logging.getLogger(__name__)
 MODELO_PRIMARIO = 'gemini-3.5-flash-lite'
 """Modelo principal via Google AI Studio (ADR)."""
 
-MODELO_FALLBACK_1 = 'qwen/qwen3-32b'
-"""Primeiro modelo de contingência via OpenRouter (ADR)."""
+MODELO_FALLBACK_1 = 'mistralai/mistral-small-3.2-24b-instruct'
+"""Primeiro modelo de contingência via OpenRouter."""
 
-MODELO_FALLBACK_2 = 'mistralai/mistral-small-3.2-24b-instruct'
-"""Segundo modelo de contingência via OpenRouter (ADR)."""
+MODELO_FALLBACK_2 = 'qwen/qwen3-32b'
+"""Segundo modelo de contingência via OpenRouter."""
 
 TIMEOUT_POR_MODELO_S = 12.0
 """Timeout padrão por chamada de modelo, em segundos (configurável em `MODELO_TIMEOUT_S`).
@@ -164,12 +164,14 @@ _PADRAO_LINHA_FONTES = re.compile(
     r'(?im)^[ \t]*(?:[-*]\s*)?\*{0,2}fontes?\*{0,2}\s*:.*(?:\n|$)'
 )
 _PADRAO_GRUPO_CITACOES_PARENTESES = re.compile(
-    r'[ \t]*\(\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]'
-    r'(?:\s*(?:,|;|e|\+)?\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\])*\s*\)'
+    r'[ \t]*\(\s*(?:(?:conforme|segundo|vide|fontes?)\s*:?\s*)?'
+    r'`?\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]`?'
+    r'(?:\s*(?:,|;|e|\+)?\s*`?\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]`?)*\s*\)'
 )
 _PADRAO_GRUPO_CITACOES_INLINE = re.compile(
-    r'[ \t]*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]'
-    r'(?:\s*(?:,|;|e|\+)?\s*\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\])*'
+    r'(?:,\s*(?:conforme|segundo|vide)\s+|[ \t]+(?:conforme|segundo|vide)\s+|[ \t]*)'
+    r'`?\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]`?'
+    r'(?:\s*(?:,|;|e|\+)?\s*`?\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]`?)*'
 )
 
 _TERMOS_SOLICITACAO_RELATORIO = (
@@ -191,6 +193,26 @@ _TERMOS_SOLICITACAO_RELATORIO = (
     'ped-014',
 )
 
+_DOMINIOS_RELATORIO_COOPERATIVA = (
+    'contas',
+    'receber',
+    'vencid',
+    'inadimpl',
+    'financ',
+    'organic',
+    'certific',
+    'adagro',
+    'dossie',
+    'ped-2026-014',
+    'ped-014',
+    'inspec',
+    'comprador',
+)
+
+_PADRAO_RELATORIO_PRODUTOR = re.compile(
+    r'\b(?:da|do|de|produtor|produtora|sobre)\s+(?:p\d{3}\b|[a-z]{3,})'
+)
+
 
 def _normalizar_busca(texto: str) -> str:
     sem_acentos = ''.join(
@@ -200,11 +222,22 @@ def _normalizar_busca(texto: str) -> str:
 
 
 def mensagem_solicita_relatorio(texto: str) -> bool:
-    """Indica se o pedido do usuário solicita explicitamente relatório, levantamento ou dossiê."""
+    """Indica se o pedido do usuário solicita explicitamente um dos relatórios da cooperativa.
+
+    Pedidos de relatório sobre um produtor específico (ex.: "gere um relatório da Maria das
+    Graças") sem menção a contas a receber, orgânicos vigentes ou ADAGRO devem ir para
+    `resumir_produtor`, e não para `gerar_relatorio`.
+    """
     if not texto or not texto.strip():
         return False
     norm = _normalizar_busca(texto)
-    return any(termo in norm for termo in _TERMOS_SOLICITACAO_RELATORIO)
+    if not any(termo in norm for termo in _TERMOS_SOLICITACAO_RELATORIO):
+        return False
+    if any(dom in norm for dom in _DOMINIOS_RELATORIO_COOPERATIVA):
+        return True
+    if _PADRAO_RELATORIO_PRODUTOR.search(norm):
+        return False
+    return True
 
 
 def limpar_citacoes_inline_texto(texto: str) -> str:
@@ -513,12 +546,10 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
         ctx: RunContext[Any],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
-        """Restringe ferramentas redundantes ou não solicitadas no passo atual:
-        - `gerar_relatorio` só fica disponível quando o usuário pede explicitamente um relatório,
-          levantamento, planilha para download ou dossiê da ADAGRO (`PED-2026-014`).
-        - Após `gerar_relatorio` executar no turno, encerra novas chamadas de função.
-        - Após `resumir_produtor` executar no turno, bloqueia chamadas redundantes de resumo,
-          busca de produtores, financeiro ou rascunho de pedido.
+        """Oculta `gerar_relatorio` quando a pergunta não pede relatório/levantamento/dossiê.
+
+        Mantém a lista de ferramentas estável entre os passos do turno (nunca remove uma
+        ferramenta que já aparece no histórico `tool_calls` do turno atual).
         """
         tool_defs = await super().prepare_tools(ctx, tool_defs)
         if len(tool_defs) <= 1:
@@ -526,32 +557,11 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
 
         msgs_turno = _mensagens_turno_atual(getattr(ctx, 'messages', ()) or ())
         texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
-        ferramentas_executadas = {
-            part.tool_name
-            for msg in msgs_turno
-            if isinstance(msg, ModelRequest)
-            for part in msg.parts
-            if isinstance(part, ToolReturnPart) and part.tool_name
-        }
 
-        if 'gerar_relatorio' in ferramentas_executadas:
-            return []
-
-        filtradas = list(tool_defs)
         if not mensagem_solicita_relatorio(texto_usuario):
-            filtradas = [t for t in filtradas if t.name != 'gerar_relatorio']
+            return [t for t in tool_defs if t.name != 'gerar_relatorio']
 
-        if 'resumir_produtor' in ferramentas_executadas:
-            bloqueadas_pos_resumo = {
-                'resumir_produtor',
-                'buscar_produtores',
-                'consultar_financeiro',
-                'rascunhar_notificacao',
-                'gerar_relatorio',
-            }
-            filtradas = [t for t in filtradas if t.name not in bloqueadas_pos_resumo]
-
-        return filtradas
+        return tool_defs
 
     async def prepare_model_request(
         self,
@@ -644,7 +654,7 @@ def construir_modelos_padrao(
     openrouter_api_key: str | None = None,
     timeout_s: float | None = None,
 ) -> list[Model]:
-    """Instancia os modelos da cadeia ADR: Gemini 3.5 Flash-Lite -> Qwen3 32B -> Mistral Small."""
+    """Instancia os modelos da cadeia: Gemini 3.5 Flash-Lite -> Mistral Small -> Qwen3 32B."""
     load_dotenv()
     chave_gemini = (
         gemini_api_key if gemini_api_key is not None else os.getenv('GEMINI_API_KEY')
@@ -664,27 +674,32 @@ def construir_modelos_padrao(
     modelos: list[Model] = [primario]
     if chave_openrouter.strip():
         openrouter_provider = OpenRouterProvider(api_key=chave_openrouter.strip())
-        # Qwen3-32B ativa modo de raciocínio longo (`reasoning`) por padrão no OpenRouter,
-        # estourando facilmente o timeout por chamada com as 10 tools; desligar evita queimar
-        # o prazo do turno esperando tokens de pensamento internos.
-        settings_qwen = OpenAIChatModelSettings(
-            timeout=settings.get('timeout'),
-            request_timeout=settings.get('request_timeout'),
-            max_retries=settings.get('max_retries'),
-            extra_body={'reasoning': {'enabled': False}},
-        )
         modelos.append(
             OpenAIChatModel(
                 MODELO_FALLBACK_1,
                 provider=openrouter_provider,
-                settings=settings_qwen,
+                settings=settings,
             )
+        )
+        # Qwen3-32B ativa raciocínio longo por padrão no OpenRouter e, com `tool_choice='required'`,
+        # o roteador pode cair no provedor `Tenstorrent`, estourando facilmente o timeout de 30s.
+        # Desabilitar `reasoning`, manter `tool_choice='auto'` e ignorar `Tenstorrent` mantém o
+        # roteamento nos provedores rápidos (ex.: DeepInfra).
+        settings_qwen = OpenAIChatModelSettings(
+            timeout=settings.get('timeout'),
+            request_timeout=settings.get('request_timeout'),
+            max_retries=settings.get('max_retries'),
+            extra_body={
+                'reasoning': {'enabled': False, 'effort': 'none'},
+                'tool_choice': 'auto',
+                'provider': {'ignore': ['Tenstorrent']},
+            },
         )
         modelos.append(
             OpenAIChatModel(
                 MODELO_FALLBACK_2,
                 provider=openrouter_provider,
-                settings=settings,
+                settings=settings_qwen,
             )
         )
     return modelos

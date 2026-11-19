@@ -789,3 +789,67 @@ def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
     assert any('4B_SEM_FONTE_FACTUAL' in r for r in turno.regras_disparadas)
     assert turno.fontes == []
     assert 'não encontrada' in turno.texto.lower()
+
+
+def test_processar_turno_descarta_relatorio_nao_solicitado_e_limpa_citacoes_inline():
+    """Pergunta simples descarta relatórios não pedidos e limpa citações inline do texto."""
+    from sabor.agent.schemas import Relatorio
+
+    def consultar_financeiro_fake(ctx: RunContext[AgentDeps]) -> dict:
+        ctx.deps.relatorios.append(
+            Relatorio(
+                tipo='contas_a_receber',
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas a receber',
+            )
+        )
+        return {
+            'arquivo': 'financeiro.csv',
+            'referencia': 'FIN-2026-013',
+            'valor_total': 6020.0,
+        }
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='consultar_financeiro_fake', args={})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': (
+                            'A SuperBom deve R$ 6.020,00 para Cícero Romão '
+                            '[financeiro.csv · FIN-2026-013].\n\n'
+                            'Fontes: [financeiro.csv · FIN-2026-013]'
+                        ),
+                        'fontes': [{'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-013'}],
+                    },
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[consultar_financeiro_fake],
+    )
+    turno = processar_turno(
+        'sess-sem-relatorio',
+        'Quem a SuperBom está devendo e há quanto tempo?',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock()),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.relatorios == []
+    assert turno.texto == 'A SuperBom deve R$ 6.020,00 para Cícero Romão.'
+    assert 'Fontes:' not in turno.texto
+    assert [(f.arquivo, f.referencia) for f in turno.fontes] == [
+        ('financeiro.csv', 'FIN-2026-013')
+    ]
