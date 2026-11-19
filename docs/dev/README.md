@@ -20,3 +20,8 @@ Esta pasta concentra a documentação técnica de desenvolvimento, arquitetura i
   - Job fora do chat sobre a tabela `pedidos` (pipelines de ingestão em JSON), gravando em `triagem_pedidos`
   - Reaproveitamento por `hash_entrada`, orçamento de tokens por pedido e por lote (#32) e novas tentativas com espera
   - Fila ordenada por urgência, exportação CSV/JSON e "Caixa de entrada" na interface
+
+- **[Observabilidade: traces do turno no Cloud Trace (#39)](observabilidade.md)**
+  - Decisão Logfire × Cloud Trace e span por turno com sessão, cache, modelo, tokens e latência
+  - `trace_id` do turno gravado na auditoria (#35), sem texto da conversa nos spans (#33)
+  - Variável `OBSERVABILIDADE` (`gcp`, `otlp`, `console`) e permissões no GCP
