@@ -42,7 +42,13 @@ from sabor.tools.consultar_dados import (
     consultar_financeiro,
     listar_lotes,
 )
-from sabor.tools.documentos import DocumentoResultado, TipoDocumento, buscar_documentos
+from sabor.tools.documentos import (
+    DocumentoInventario,
+    DocumentoResultado,
+    TipoDocumento,
+    buscar_documentos,
+    listar_documentos,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +81,8 @@ _RE_DATA = r'(\d{2}/\d{2}/\d{4})'
 _RE_DATA_INSPECAO = re.compile(r'data da inspe[cç][aã]o:\s*' + _RE_DATA, re.IGNORECASE)
 _RE_NC = re.compile(r'(NC-\d{3})\s*\(([^)]+)\)\s*:\s*(.+?)(?=\n\s*NC-\d{3}|\n\s*\n[A-Z]|\Z)', re.S)
 _RE_PRODUTOR = re.compile(r'\bP\d{3}\b')
+_RE_NEGACAO = re.compile(r'\b(nao|exceto|exclui\w*|excluid\w*|sem certificacao)\b')
+"""Linhas da lista de produtos certificados que não afirmam a certificação (texto normalizado)."""
 _RE_CITACAO = re.compile(r'\[[^\[\]]+ · [^\[\]]+\]')
 
 MAX_CITACOES_DESTAQUE = 4
@@ -249,6 +257,7 @@ def _buscar_docs(
     pergunta: str,
     tipo_doc: TipoDocumento,
     *,
+    produtor_id: str | None = None,
     apenas_vigentes: bool = False,
     k: int = 20,
 ) -> list[DocumentoResultado] | None:
@@ -257,7 +266,12 @@ def _buscar_docs(
     em vez de afirmar que o documento não existe."""
     try:
         resultado = buscar_documentos(
-            ctx, pergunta, tipo_doc=tipo_doc, apenas_vigentes=apenas_vigentes, k=k
+            ctx,
+            pergunta,
+            tipo_doc=tipo_doc,
+            produtor_id=produtor_id,
+            apenas_vigentes=apenas_vigentes,
+            k=k,
         )
     except SemPermissao:
         raise
@@ -429,9 +443,35 @@ def _relatorio_contas_a_receber(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, 
 @dataclass
 class _CertificadoProdutor:
     produtor: ProdutorResultado
+    documento: DocumentoInventario | None = None
+    """Certificado do produtor no inventário do acervo (`None` = não consta)."""
     fonte_certificado: Fonte | None = None
+    """Trecho `PRODUTOS CERTIFICADOS` lido para conferir os produtos."""
     confirmados: list[str] = field(default_factory=list)
     nao_confirmados: list[str] = field(default_factory=list)
+
+    @property
+    def situacao(self) -> Literal['conferido', 'lista_nao_lida', 'fora_do_inventario']:
+        if self.documento is None:
+            return 'fora_do_inventario'
+        return 'conferido' if self.fonte_certificado is not None else 'lista_nao_lida'
+
+    def motivo_nao_confirmado(self) -> str:
+        if self.situacao == 'fora_do_inventario':
+            return 'o certificado não consta no inventário do acervo'
+        if self.situacao == 'lista_nao_lida':
+            return (
+                'o certificado consta no inventário, mas não foi possível ler a lista de '
+                'produtos certificados'
+            )
+        return 'não aparece na lista de produtos certificados'
+
+    def citacao_certificado(self, fontes: _Fontes) -> str:
+        if self.fonte_certificado is not None:
+            return fontes.add(self.fonte_certificado)
+        if self.documento is not None:
+            return f'{fontes.add(self.documento.fonte)} (produtos não confirmados)'
+        return 'não consta no inventário'
 
 
 @dataclass
@@ -440,10 +480,36 @@ class _Organicos:
     vencendo: list[ProdutorResultado]
     vencidos: list[ProdutorResultado]
     acervo_consultado: bool
+    """A busca no acervo funcionou (o inventário é consultado sempre)."""
+
+
+def _secoes_produtos_certificados(
+    docs: Iterable[DocumentoResultado],
+) -> dict[str, list[DocumentoResultado]]:
+    """Só os trechos da seção `PRODUTOS CERTIFICADOS` de cada certificado, por produtor.
+
+    Outras seções (observações, auditoria, "produtos que eram certificados") podem citar um
+    produto justamente para dizer que ele não está certificado.
+    """
+    secoes: dict[str, list[DocumentoResultado]] = defaultdict(list)
+    for doc in docs:
+        if doc.produtor_id and 'produtos certificados' in _normalizar(doc.secao or ''):
+            secoes[doc.produtor_id].append(doc)
+    return dict(secoes)
+
+
+def _produto_na_lista(produto: str, trechos: Iterable[DocumentoResultado]) -> bool:
+    """O produto aparece, como palavra inteira, numa linha que não o exclui."""
+    alvo = re.compile(rf'\b{re.escape(_normalizar(produto))}\b')
+    for trecho in trechos:
+        for linha in _normalizar(trecho.trecho).splitlines():
+            if alvo.search(linha) and not _RE_NEGACAO.search(linha):
+                return True
+    return False
 
 
 def _coletar_organicos(ctx: RunContext[AgentDeps]) -> _Organicos:
-    """Cruza o cadastro (validade real da certificação) com os certificados do acervo."""
+    """Cruza o cadastro (validade real), o inventário e a lista de produtos de cada certificado."""
     data_ref = ctx.deps.data_referencia
     vigentes = buscar_produtores(ctx, organico=True, ativo=True)
     declarados_vencidos = [
@@ -451,6 +517,9 @@ def _coletar_organicos(ctx: RunContext[AgentDeps]) -> _Organicos:
         for p in buscar_produtores(ctx, organico=False)
         if p.certificacao_organica_declarada and not p.certificacao_organica_vigente
     ]
+    inventario = {
+        d.produtor_id: d for d in listar_documentos(ctx, tipo_doc='certificado') if d.produtor_id
+    }
     docs = _buscar_docs(
         ctx,
         'produtos certificados orgânicos',
@@ -458,32 +527,25 @@ def _coletar_organicos(ctx: RunContext[AgentDeps]) -> _Organicos:
         apenas_vigentes=True,
         k=40,
     )
-
-    textos: dict[str, list[DocumentoResultado]] = defaultdict(list)
-    for doc in docs or []:
-        if doc.produtor_id:
-            textos[doc.produtor_id].append(doc)
+    secoes = _secoes_produtos_certificados(docs or [])
 
     resultado: list[_CertificadoProdutor] = []
     for produtor in vigentes:
-        cert = _CertificadoProdutor(produtor=produtor)
-        trechos = textos.get(produtor.id, [])
-        if docs is None or not trechos:
-            # Sem o trecho do certificado não há como confirmar os produtos certificados.
-            cert.nao_confirmados = list(produtor.produtos)
-        else:
-            principal = next(
-                (d for d in trechos if 'PRODUTOS' in (d.secao or '').upper()), trechos[0]
+        cert = _CertificadoProdutor(produtor=produtor, documento=inventario.get(produtor.id))
+        trechos = secoes.get(produtor.id, []) if cert.documento is not None else []
+        if cert.documento is not None and not trechos and docs is not None:
+            # A busca ampla nem sempre traz todos: tenta direto no certificado do produtor.
+            direcionada = _buscar_docs(
+                ctx, 'produtos certificados', 'certificado', produtor_id=produtor.id, k=10
             )
-            cert.fonte_certificado = principal.fonte
-            texto_cert = _normalizar(' '.join(d.trecho for d in trechos))
-            for produto in produtor.produtos:
-                alvo = (
-                    cert.confirmados
-                    if _normalizar(produto) in texto_cert
-                    else (cert.nao_confirmados)
-                )
-                alvo.append(produto)
+            trechos = _secoes_produtos_certificados(direcionada or []).get(produtor.id, [])
+        if trechos:
+            cert.fonte_certificado = trechos[0].fonte
+        for produto in produtor.produtos:
+            if trechos and _produto_na_lista(produto, trechos):
+                cert.confirmados.append(produto)
+            else:
+                cert.nao_confirmados.append(produto)
         resultado.append(cert)
 
     vencendo = [
@@ -532,8 +594,9 @@ def _relatorio_organicos(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, list[st
 
     if not org.acervo_consultado:
         linhas += [
-            '> ⚠️ Não foi possível consultar os certificados no acervo documental agora. A lista '
-            'abaixo vem só do cadastro e nenhum produto foi confirmado no certificado.',
+            '> ⚠️ Não foi possível consultar o texto dos certificados agora. A lista abaixo vem '
+            'do cadastro e do inventário do acervo, e nenhum produto foi confirmado no '
+            'certificado.',
             '',
         ]
 
@@ -574,7 +637,8 @@ def _relatorio_organicos(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, list[st
     linhas.append('')
 
     nao_confirmados = [
-        f'{produto}: {_rotulo_produtor(c.produtor)} {fontes.add(c.produtor.fonte)}'
+        f'{produto}: {_rotulo_produtor(c.produtor)}; {c.motivo_nao_confirmado()}. '
+        f'{fontes.add(c.documento.fonte if c.documento else c.produtor.fonte)}'
         for produto in sorted(por_produto, key=_normalizar)
         for c, ok in por_produto[produto]
         if not ok
@@ -583,8 +647,8 @@ def _relatorio_organicos(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, list[st
         linhas += [
             '### Produtos do cadastro sem confirmação no certificado',
             '',
-            'Constam no cadastro de produtores certificados, mas não foram localizados no '
-            'trecho do certificado. Não ofereça como orgânicos sem conferir o documento.',
+            'Constam no cadastro de produtores com certificação vigente, mas a certificação '
+            'deles não foi confirmada no documento. Não ofereça como orgânicos sem conferir.',
             '',
             *_lista(nao_confirmados),
             '',
@@ -602,7 +666,7 @@ def _relatorio_organicos(ctx: RunContext[AgentDeps]) -> tuple[Relatorio, list[st
                 _data(p.validade_certificacao),
                 f'{dias} dias' if dias is not None else '—',
                 ', '.join(cert.confirmados) or '—',
-                fontes.add(cert.fonte_certificado) if cert.fonte_certificado else 'não localizado',
+                cert.citacao_certificado(fontes),
             ]
         )
     if tabela_prod:
@@ -702,27 +766,35 @@ def _secao_cadastro(
 def _secao_certificacoes(
     ctx: RunContext[AgentDeps], titulo: str, org: _Organicos, fontes: _Fontes
 ) -> _Secao:
-    secao = _Secao(titulo, nao_verificado=not org.acervo_consultado)
+    secao = _Secao(titulo)
     for cert in sorted(org.vigentes, key=lambda c: c.produtor.id):
         p = cert.produtor
-        if cert.fonte_certificado:
-            secao.existe.append(
-                f'{_rotulo_produtor(p)}: vigente até {_data(p.validade_certificacao)}. '
-                f'{fontes.add(cert.fonte_certificado)}'
-            )
-        elif org.acervo_consultado:
+        if cert.situacao == 'fora_do_inventario':
+            # Ausência afirmada pelo inventário, não por uma busca sem resultado.
             secao.falta.append(
                 f'{_rotulo_produtor(p)}: cadastro indica certificação vigente até '
-                f'{_data(p.validade_certificacao)}, mas o certificado não está no acervo. '
-                f'{fontes.add(p.fonte)}'
+                f'{_data(p.validade_certificacao)}, mas o certificado não consta no inventário '
+                f'do acervo. {fontes.add(p.fonte)}'
+            )
+            continue
+        secao.existe.append(
+            f'{_rotulo_produtor(p)}: vigente até {_data(p.validade_certificacao)}. '
+            f'{cert.citacao_certificado(fontes)}'
+        )
+        if cert.situacao == 'lista_nao_lida':
+            secao.atencao.append(
+                f'{_rotulo_produtor(p)}: não foi possível ler a lista de produtos do certificado; '
+                'conferir o documento.'
             )
     secao.atencao += _linhas_atencao_organicos(org, ctx.deps.data_referencia, fontes)
     secao.resumo = (
-        f'{len(org.vigentes)} vigentes; {len(org.vencendo)} vencem em até '
+        f'{len(secao.existe)} vigentes no acervo; {len(org.vencendo)} vencem em até '
         f'{DIAS_ALERTA_RENOVACAO} dias; {len(org.vencidos)} vencida(s) ainda marcada(s) no cadastro'
     )
     if not org.acervo_consultado:
-        secao.atencao.append('Acervo de certificados indisponível agora; conferir os arquivos.')
+        secao.atencao.append(
+            'Busca no acervo indisponível agora: certificados conferidos só pelo inventário.'
+        )
     return secao
 
 
@@ -736,28 +808,36 @@ def _data_inspecao(textos: Iterable[str]) -> date | None:
 def _secao_laudos(
     ctx: RunContext[AgentDeps], titulo: str, produtores: list[ProdutorResultado], fontes: _Fontes
 ) -> _Secao:
+    """Laudos dos últimos 12 meses: existência pelo inventário, data pelo texto do laudo."""
     data_ref = ctx.deps.data_referencia
+    nomes = {p.id: p.nome_completo for p in produtores}
+    inventario = listar_documentos(ctx, tipo_doc='laudo')
     docs = _buscar_docs(
         ctx, 'laudo de inspeção sanitária data da inspeção resultado geral', 'laudo', k=20
     )
-    if docs is None:
-        return _Secao(
-            titulo,
-            nao_verificado=True,
-            atencao=['Acervo de laudos indisponível agora; conferir a pasta de laudos.'],
-        )
+    trechos_por_arquivo = _agrupar_por_arquivo(docs or [])
 
     secao = _Secao(titulo)
     com_laudo: set[str] = set()
-    for arquivo, trechos in sorted(_agrupar_por_arquivo(docs).items()):
-        pid = trechos[0].produtor_id
+    for doc in inventario:
+        pid = doc.produtor_id
+        rotulo = f'{pid} · {nomes[pid]}' if pid in nomes else (pid or doc.arquivo)
+        trechos = trechos_por_arquivo.get(doc.arquivo, [])
         emitido = _data_inspecao(t.trecho for t in trechos)
-        com_data = next((t for t in trechos if _RE_DATA_INSPECAO.search(t.trecho)), trechos[0])
-        citacao = fontes.add(com_data.fonte)
-        rotulo = f'{pid} · {trechos[0].produtor_nome}' if pid else arquivo
+        if emitido is None and docs is not None and pid:
+            direcionada = _buscar_docs(
+                ctx, 'laudo nº data da inspeção', 'laudo', produtor_id=pid, k=10
+            )
+            trechos = [t for t in direcionada or [] if t.arquivo == doc.arquivo] or trechos
+            emitido = _data_inspecao(t.trecho for t in trechos)
+        com_data = next((t for t in trechos if _RE_DATA_INSPECAO.search(t.trecho)), None)
+        citacao = fontes.add(com_data.fonte if com_data else doc.fonte)
         if emitido is None:
-            secao.atencao.append(f'{rotulo}: laudo sem data de inspeção localizada. {citacao}')
-            secao.existe.append(f'{rotulo}: laudo ({arquivo}). {citacao}')
+            secao.existe.append(f'{rotulo}: laudo {doc.arquivo} (data não confirmada). {citacao}')
+            secao.atencao.append(
+                f'{rotulo}: não foi possível confirmar a data do laudo; conferir se é dos '
+                'últimos 12 meses.'
+            )
         elif (data_ref - emitido).days <= 365:
             secao.existe.append(f'{rotulo}: laudo de {_data(emitido)}. {citacao}')
         else:
@@ -777,12 +857,18 @@ def _secao_laudos(
                 if p.registro_sie
                 else f'produz {", ".join(p.produtos_origem_animal)} (origem animal)'
             )
+            # Ausência afirmada pelo inventário do acervo, não por uma busca sem resultado.
             secao.falta.append(
-                f'{_rotulo_produtor(p)}: sem laudo sanitário; {motivo}. {fontes.add(p.fonte)}'
+                f'{_rotulo_produtor(p)}: nenhum laudo sanitário no inventário do acervo; '
+                f'{motivo}. {fontes.add(p.fonte)}'
             )
-    sem_laudo = len(secao.falta)
+    if docs is None and inventario:
+        secao.atencao.append(
+            'Busca no acervo indisponível agora: datas dos laudos não confirmadas.'
+        )
+    sem_laudo = sum(1 for linha in secao.falta if 'nenhum laudo' in linha)
     secao.resumo = (
-        f'{len(com_laudo)} produtor(es) com laudo; {sem_laudo} sem laudo no período '
+        f'{len(com_laudo)} produtor(es) com laudo no acervo; {sem_laudo} sem laudo '
         '(SIE ou produto de origem animal)'
     )
     return secao
@@ -851,34 +937,51 @@ def _secao_rastreabilidade(ctx: RunContext[AgentDeps], titulo: str, fontes: _Fon
 
 
 def _eh_institucional(texto: str) -> bool:
-    texto_norm = _normalizar(texto)
+    # Separadores viram espaço: em `contrato_pnae_garanhuns.txt` o `_` não é limite de palavra.
+    texto_norm = re.sub(r'[^a-z0-9]+', ' ', _normalizar(texto))
     return any(re.search(rf'\b{p}\b', texto_norm) for p in _PALAVRAS_INSTITUCIONAL)
 
 
 def _secao_contratos(ctx: RunContext[AgentDeps], titulo: str, fontes: _Fontes) -> _Secao:
+    """Contratos do inventário, classificados pelo contratante quando o texto permite."""
+    inventario = listar_documentos(ctx, tipo_doc='contrato')
     docs = _buscar_docs(ctx, 'contrato de fornecimento contratante comprador', 'contrato', k=20)
-    if docs is None:
-        return _Secao(
-            titulo,
-            nao_verificado=True,
-            atencao=['Acervo de contratos indisponível agora; conferir a pasta de contratos.'],
-        )
+    trechos_por_arquivo = _agrupar_por_arquivo(docs or [])
+
     secao = _Secao(titulo)
-    privados = 0
-    for arquivo, trechos in sorted(_agrupar_por_arquivo(docs).items()):
+    privados = indefinidos = 0
+    for doc in inventario:
+        trechos = trechos_por_arquivo.get(doc.arquivo, [])
         institucional = next((t for t in trechos if _eh_institucional(t.trecho)), None)
-        if institucional is not None or _eh_institucional(arquivo):
-            citacao = fontes.add((institucional or trechos[0]).fonte)
-            secao.existe.append(f'Contrato institucional: {arquivo}. {citacao}')
-        else:
+        if institucional is not None or _eh_institucional(f'{doc.arquivo} {doc.titulo or ""}'):
+            citacao = fontes.add(institucional.fonte if institucional else doc.fonte)
+            secao.existe.append(f'Contrato institucional: {doc.arquivo}. {citacao}')
+        elif trechos:
             privados += 1
             secao.atencao.append(
-                f'{arquivo} é um contrato com comprador privado; não entra neste item. '
+                f'{doc.arquivo} é um contrato com comprador privado; não entra neste item. '
                 f'{fontes.add(trechos[0].fonte)}'
             )
+        else:
+            indefinidos += 1
+            secao.atencao.append(
+                f'{doc.arquivo} consta no inventário, mas não foi possível confirmar o '
+                f'contratante; conferir se é institucional. {fontes.add(doc.fonte)}'
+            )
+
     if not secao.existe:
-        secao.falta.append('Nenhum contrato com comprador institucional no acervo.')
+        if indefinidos:
+            secao.nao_verificado = True
+        elif not inventario:
+            secao.falta.append('Nenhum contrato no inventário do acervo.')
+        else:
+            secao.falta.append(
+                f'Nenhum dos {len(inventario)} contratos do inventário é com comprador '
+                'institucional.'
+            )
     secao.resumo = f'{len(secao.existe)} institucional(is); {privados} privado(s) fora do pedido'
+    if indefinidos:
+        secao.resumo += f'; {indefinidos} sem contratante confirmado'
     return secao
 
 
@@ -929,7 +1032,10 @@ def _secao_pendencias_inspecao(ctx: RunContext[AgentDeps], fontes: _Fontes) -> _
                     f'{codigo}: não há evidência de resolução nos dados; levar comprovante.'
                 )
     if not secao.existe:
-        secao.atencao.append('Nenhuma não conformidade localizada no relatório de inspeção.')
+        secao.atencao.append(
+            'Nenhuma não conformidade localizada nos trechos consultados do relatório de '
+            'inspeção; conferir o documento.'
+        )
     secao.resumo = (
         f'{len(secao.existe)} não conformidade(s); {len(secao.falta)} com indício de descumprimento'
     )

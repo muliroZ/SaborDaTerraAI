@@ -51,10 +51,10 @@ def busca_local(monkeypatch, conn):
                    COALESCE(cb.validade, p.validade_certificacao), p.nome_completo
             FROM chunks_busca cb
             LEFT JOIN produtores p ON p.id = cb.produtor_id
-            WHERE cb.tipo_doc = %s
+            WHERE cb.tipo_doc = %s AND (%s::text IS NULL OR cb.produtor_id = %s)
             ORDER BY cb.arquivo, cb.ordem
             """,
-            (tipo_doc,),
+            (tipo_doc, produtor_id, produtor_id),
         ).fetchall()
         resultados = []
         for arquivo, secao, t_doc, pid, texto, validade, nome in linhas:
@@ -173,13 +173,18 @@ def test_organicos_perfil_produtor_sem_certificacao(conn, busca_local):
 
 
 def test_organicos_sem_acervo_avisa_e_nao_confirma_produtos(conn, busca_fora_do_ar):
+    if not _acervo_ingerido(conn):
+        pytest.skip('Acervo documental não ingerido')
     ctx = _ctx(conn)
     resultado = gerar_relatorio(ctx, 'organicos_vigentes')
 
     assert resultado.gerado is True
     md = ctx.deps.relatorios[0].markdown
-    assert 'Não foi possível consultar os certificados' in md
-    assert 'Produtos do cadastro sem confirmação no certificado' in md
+    assert 'Não foi possível consultar o texto dos certificados' in md
+    sem_confirmacao = md.split('### Produtos do cadastro sem confirmação no certificado')[1]
+    # O certificado existe (inventário): não afirma ausência, só que a lista não foi lida.
+    assert 'consta no inventário, mas não foi possível ler a lista' in sem_confirmacao
+    assert 'não consta no inventário' not in sem_confirmacao
     assert any('indisponível' in d for d in resultado.destaques)
 
 
@@ -244,16 +249,33 @@ def test_dossie_adagro_restrito_a_equipe(conn):
     assert ctx.deps.relatorios == []
 
 
-def test_dossie_sem_acervo_marca_itens_nao_verificados(conn, busca_fora_do_ar):
+def test_dossie_sem_busca_usa_o_inventario_e_nao_inventa_ausencias(conn, busca_fora_do_ar):
+    """Busca fora do ar: o que existe vem do inventário; o que depende do texto fica a confirmar."""
+    if not _acervo_ingerido(conn):
+        pytest.skip('Acervo documental não ingerido')
     ctx = _ctx(conn)
     resultado = gerar_relatorio(ctx, 'dossie_adagro')
 
     assert resultado.gerado is True
     md = ctx.deps.relatorios[0].markdown
-    assert '⏳ Não verificado' in _secao(md, 3)  # laudos
-    assert '⏳ Não verificado' in _secao(md, 5)  # contratos
-    # O que não depende do acervo continua sendo verificado.
-    assert '2 de 21 produtos' in _secao(md, 4)
+
+    certificados = _secao(md, 2)
+    assert certificados.count('vigente até') == 8
+    assert '**O que falta**' not in certificados
+    assert 'inventário' in certificados
+
+    laudos = _secao(md, 3)
+    existe, falta = laudos.split('**O que falta**')
+    assert 'P002' in existe and 'data não confirmada' in existe
+    assert 'P007' in falta and 'nenhum laudo sanitário no inventário' in falta
+
+    contratos = _secao(md, 5)
+    assert 'Contrato institucional: contratos/contrato_pnae_garanhuns.txt' in contratos
+    assert 'não foi possível confirmar o contratante' in contratos
+    assert 'Nenhum' not in contratos
+
+    assert '⏳ Não verificado' in _secao(md, 6)  # NCs dependem do texto da inspeção
+    assert '2 de 21 produtos' in _secao(md, 4)  # não depende do acervo
 
 
 def test_itens_pedidos_extrai_lista_da_notificacao():
@@ -292,3 +314,110 @@ def test_destaques_trazem_a_fonte_de_cada_numero(conn, busca_local):
     pendencias = dossie.destaques[-1]
     assert '[financeiro.csv · FIN-2026-018]' in pendencias
     assert 'inspecao/inspecao_adagro_2026.txt' in pendencias
+
+
+# =============================================================================
+# Revisão do PR #48: conferência do certificado e ausência documental
+# =============================================================================
+
+
+def _trecho_certificado(arquivo: str, pid: str, secao: str, texto: str) -> DocumentoResultado:
+    return DocumentoResultado(
+        arquivo=arquivo,
+        secao=secao,
+        citacao=f'[{arquivo} · {secao}]',
+        tipo_doc='certificado',
+        produtor_id=pid,
+        produtor_nome=None,
+        produtor_status=None,
+        registro_sie=None,
+        dap_caf=None,
+        validade=date(2027, 3, 20),
+        vigente=True,
+        trecho=texto,
+        score_rrf=0.02,
+        similaridade_vetorial=None,
+        score_lexical=None,
+        fonte=Fonte(arquivo=arquivo, referencia=secao),
+    )
+
+
+def test_certificado_so_confirma_produto_afirmado_na_lista(conn, monkeypatch):
+    """Cenário da revisão: "mel não está contemplado pelo certificado" não pode confirmar o mel.
+
+    Só a seção PRODUTOS CERTIFICADOS conta, e uma linha que exclui o produto não o confirma.
+    """
+    if not _acervo_ingerido(conn):
+        pytest.skip('Acervo documental não ingerido')
+    arquivo = 'certificacoes/cert_organica_jose_santos_P002.txt'
+    trechos = [
+        _trecho_certificado(
+            arquivo,
+            'P002',
+            'OBSERVAÇÕES',
+            'Mel silvestre e mel de abelha jandaíra não estão contemplados pelo certificado.',
+        ),
+        _trecho_certificado(
+            arquivo,
+            'P002',
+            'PRODUTOS CERTIFICADOS',
+            '1. Própolis verde\n2. Mel de abelha jandaíra\n'
+            '3. Mel silvestre - não contemplado nesta certificação',
+        ),
+    ]
+
+    def _buscar(ctx, pergunta, *, tipo_doc=None, produtor_id=None, apenas_vigentes=False, k=5):
+        return BuscaDocumentosResultado(encontrado=True, resultados=trechos)
+
+    monkeypatch.setattr(mod, 'buscar_documentos', _buscar)
+    ctx = _ctx(conn, 'P002')
+    gerar_relatorio(ctx, 'organicos_vigentes')
+    md = ctx.deps.relatorios[0].markdown
+
+    por_produto = md.split('## Por produto')[1].split('### Produtos do cadastro')[0]
+    assert '| própolis |' in por_produto
+    assert '| mel de abelha jandaíra |' in por_produto  # a linha da lista afirma o produto
+    assert '| mel silvestre |' not in por_produto
+    sem_confirmacao = md.split('### Produtos do cadastro sem confirmação no certificado')[1]
+    assert 'mel silvestre: P002' in sem_confirmacao
+    assert 'não aparece na lista de produtos certificados' in sem_confirmacao
+
+
+def test_ausencia_de_certificado_so_e_afirmada_pelo_inventario(conn, monkeypatch):
+    """Busca sem resultado não prova ausência: certificado no inventário fica "a confirmar";
+    só o que não consta no inventário vira lacuna."""
+    if not _acervo_ingerido(conn):
+        pytest.skip('Acervo documental não ingerido')
+
+    def _busca_vazia(ctx, pergunta, *, tipo_doc=None, produtor_id=None, **kwargs):
+        return BuscaDocumentosResultado(encontrado=False, resultados=[])
+
+    inventario_real = mod.listar_documentos
+
+    def _inventario_sem_p014(ctx, *, tipo_doc=None):
+        return [d for d in inventario_real(ctx, tipo_doc=tipo_doc) if d.produtor_id != 'P014']
+
+    monkeypatch.setattr(mod, 'buscar_documentos', _busca_vazia)
+    monkeypatch.setattr(mod, 'listar_documentos', _inventario_sem_p014)
+    ctx = _ctx(conn)
+    gerar_relatorio(ctx, 'dossie_adagro')
+    certificados = _secao(ctx.deps.relatorios[0].markdown, 2)
+
+    existe, resto = certificados.split('**O que falta**')
+    falta, atencao = resto.split('**Atenção**')
+    assert 'P001' in existe and '(produtos não confirmados)' in existe
+    assert 'P001' not in falta
+    assert 'P001' in atencao and 'não foi possível ler a lista de produtos' in atencao
+    assert 'P014' in falta and 'não consta no inventário do acervo' in falta
+    assert '⚠️ Parcial' in certificados
+
+
+def test_inventario_respeita_o_perfil_produtor(conn):
+    if not _acervo_ingerido(conn):
+        pytest.skip('Acervo documental não ingerido')
+    from sabor.tools.documentos import listar_documentos
+
+    todos = listar_documentos(_ctx(conn), tipo_doc='certificado')
+    proprios = listar_documentos(_ctx(conn, 'P002'), tipo_doc='certificado')
+    assert len(todos) == 9
+    assert [d.produtor_id for d in proprios] == ['P002']

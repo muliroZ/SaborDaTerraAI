@@ -133,7 +133,6 @@ def processar_guardrail_saida(
         regras_disparadas.append(f"4A_BLOQUEIO_SANITARIO: {msg_motivo}")
         resposta.texto = f"{MENSAGEM_BLOQUEIO_SANITARIO} ({msg_motivo})"
         resposta.rascunhos = []
-        resposta.relatorios = []  # anexos do turno bloqueado também não saem (#15)
         if not any(f.tipo == 'conformidade' for f in resposta.flags):
             resposta.flags.append(Flag(tipo='conformidade', descricao=msg_motivo))
         return resposta, regras_disparadas

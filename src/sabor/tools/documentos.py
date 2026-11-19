@@ -275,3 +275,68 @@ def buscar_documentos(
         resultados=resultados,
         mensagem=None,
     )
+
+
+# =============================================================================
+# Inventário do acervo (apoio aos relatórios, Issue #15)
+# =============================================================================
+
+
+class DocumentoInventario(BaseModel):
+    arquivo: str
+    tipo_doc: TipoDocumento
+    produtor_id: str | None
+    titulo: str | None
+    validade: date | None
+    fonte: Fonte
+
+
+def listar_documentos(
+    ctx: RunContext[AgentDeps],
+    *,
+    tipo_doc: TipoDocumento | None = None,
+) -> list[DocumentoInventario]:
+    """Inventário do acervo ingerido (tabela `documentos`), sem busca semântica.
+
+    Uma busca sem resultado não prova que um documento falta; o inventário prova. Não é
+    exportada em `sabor.tools`, então não vira tool do agente: serve aos relatórios (#15). O
+    perfil produtor vê os próprios documentos e os gerais que o citam, como em
+    `buscar_documentos`.
+    """
+    usuario = _resolver_usuario(ctx.deps.usuario)
+    produtor_id_filtro = _aplicar_filtro_produtor(usuario, None)
+
+    condicoes: list[str] = []
+    parametros: list[object] = []
+    if tipo_doc is not None:
+        condicoes.append('d.tipo_doc = %s')
+        parametros.append(tipo_doc)
+    if produtor_id_filtro is not None:
+        condicoes.append(
+            '(d.produtor_id = %s OR (d.produtor_id IS NULL AND EXISTS ('
+            'SELECT 1 FROM chunks c WHERE c.arquivo = d.arquivo '
+            "AND (d.metadados || c.metadados)->'produtores_citados' @> to_jsonb(%s::text))))"
+        )
+        parametros.extend([produtor_id_filtro, produtor_id_filtro])
+    where_sql = f"WHERE {' AND '.join(condicoes)}" if condicoes else ''
+
+    linhas = ctx.deps.conn.execute(
+        f"""
+        SELECT d.arquivo, d.tipo_doc, d.produtor_id, d.titulo, d.validade
+        FROM documentos d
+        {where_sql}
+        ORDER BY d.arquivo
+        """,
+        parametros,
+    ).fetchall()
+    return [
+        DocumentoInventario(
+            arquivo=arquivo,
+            tipo_doc=t_doc,
+            produtor_id=pid,
+            titulo=titulo,
+            validade=validade,
+            fonte=Fonte(arquivo=arquivo, referencia=titulo or 'documento'),
+        )
+        for arquivo, t_doc, pid, titulo, validade in linhas
+    ]
