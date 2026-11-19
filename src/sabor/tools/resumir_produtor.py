@@ -53,6 +53,59 @@ class ResumoProdutorResultado(BaseModel):
     mensagem: str | None = None
 
 
+_TERMOS_NC_ADAGRO = (
+    'nc-',
+    'não conformidade',
+    'nao conformidade',
+    'interdi',
+    'suspens',
+    'irregular',
+    'bloque',
+    'pendente',
+)
+
+_PADRAO_PRODUTOR_ID = re.compile(r'\bP\d{3}\b', re.IGNORECASE)
+
+
+def _chunk_tem_nc_para_produtor(
+    texto_nc: str,
+    prod_id: str,
+    doc_produtor_id: str | None,
+) -> bool:
+    """Verifica se há apontamento/NC aplicável ao `prod_id` no chunk.
+
+    Em documentos individuais (`doc_produtor_id == prod_id`), avalia o chunk inteiro.
+    Em documentos coletivos (`doc_produtor_id is None`, ex.: relatório da ADAGRO),
+    isola apenas os blocos/linhas que citam o `prod_id` para não atribuir a um produtor
+    regular a não conformidade de outro produtor citado no mesmo chunk.
+    """
+    if doc_produtor_id is not None and doc_produtor_id.upper() == prod_id.upper():
+        blocos = [texto_nc]
+    else:
+        padrao_alvo = re.compile(rf'\b{re.escape(prod_id)}\b', re.IGNORECASE)
+        blocos = []
+        for paragrafo in re.split(r'\n\s*\n+', texto_nc):
+            if not padrao_alvo.search(paragrafo):
+                continue
+            outros = {
+                pid.upper()
+                for pid in _PADRAO_PRODUTOR_ID.findall(paragrafo)
+                if pid.upper() != prod_id.upper()
+            }
+            if outros:
+                blocos.extend(
+                    linha for linha in paragrafo.splitlines() if padrao_alvo.search(linha)
+                )
+            else:
+                blocos.append(paragrafo)
+
+    for bloco in blocos:
+        bloco_low = bloco.lower()
+        if any(termo in bloco_low for termo in _TERMOS_NC_ADAGRO):
+            return True
+    return False
+
+
 def _remover_acentos(texto: str) -> str:
     return ''.join(
         c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn'
@@ -242,7 +295,7 @@ def resumir_produtor(
     # Busca NCs da ADAGRO nos chunks do próprio produtor OU no relatório geral de inspeção
     chunks_nc = conn.execute(
         """
-        SELECT DISTINCT c.arquivo, COALESCE(c.secao, 'GERAL'), c.texto
+        SELECT DISTINCT c.arquivo, COALESCE(c.secao, 'GERAL'), c.texto, d.produtor_id
         FROM chunks c
         JOIN documentos d ON d.arquivo = c.arquivo
         WHERE (
@@ -254,21 +307,8 @@ def resumir_produtor(
         (prod_id, f'%{prod_id}%'),
     ).fetchall()
 
-    for arq_nc, secao_nc, texto_nc in chunks_nc:
-        texto_low = texto_nc.lower()
-        if any(
-            t in texto_low
-            for t in (
-                'nc-',
-                'não conformidade',
-                'nao conformidade',
-                'interdi',
-                'suspens',
-                'irregular',
-                'bloque',
-                'pendente',
-            )
-        ):
+    for arq_nc, secao_nc, texto_nc, doc_prod_id in chunks_nc:
+        if _chunk_tem_nc_para_produtor(texto_nc, prod_id, doc_prod_id):
             _adicionar_fonte(Fonte(arquivo=arq_nc, referencia=secao_nc))
             alertas.append(f'Não conformidade / apontamento ADAGRO registrado ({arq_nc}).')
             break

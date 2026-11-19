@@ -9,6 +9,7 @@ from sabor.agent.mascarador import Mascarador
 from sabor.db import conectar_readonly
 from sabor.tools import resumir_produtor
 from sabor.tools.base import SemPermissao
+from sabor.tools.resumir_produtor import _chunk_tem_nc_para_produtor
 
 
 def _ctx(conn, usuario: str = 'Dona Lúcia') -> RunContext[AgentDeps]:
@@ -64,3 +65,42 @@ def test_alertas_certificacao_e_adagro():
     assert any('vencendo' in a.lower() for a in res_p004.alertas)
     assert any('vencida' in a.lower() for a in res_p008.alertas)
     assert any('adagro' in a.lower() or 'sie' in a.lower() for a in res_p017.alertas)
+
+
+def test_chunk_nc_nao_vaza_irregularidade_de_outro_produtor():
+    """Documento coletivo com P001 REGULAR e P017 IRREGULAR não deve alertar P001."""
+    chunk_coletivo = (
+        '1. P001 - Maria das Graças S. Ferreira (Garanhuns)\n'
+        '   Certificação orgânica: VIGENTE\n'
+        '   Situação: REGULAR\n\n'
+        '5. P017 - Wellington da Silva Monteiro (Garanhuns)\n'
+        '   Registro SIE: NÃO POSSUI\n'
+        '   Situação: IRREGULAR - Produtor sem SIE.\n'
+    )
+    assert _chunk_tem_nc_para_produtor(chunk_coletivo, 'P001', None) is False
+    assert _chunk_tem_nc_para_produtor(chunk_coletivo, 'P017', None) is True
+
+    chunk_compacto = 'P001: Situação REGULAR\nP017: Situação IRREGULAR'
+    assert _chunk_tem_nc_para_produtor(chunk_compacto, 'P001', None) is False
+    assert _chunk_tem_nc_para_produtor(chunk_compacto, 'P017', None) is True
+
+    # Documento individual do próprio produtor avalia o texto todo
+    assert _chunk_tem_nc_para_produtor('NC-002 pendente de adequação.', 'P003', 'P003') is True
+
+
+def test_produtores_regulares_na_adagro_nao_recebem_falso_positivo():
+    """P001, P002 e P005 são regulares na inspeção ADAGRO; P003 só cita seu próprio laudo."""
+    with conectar_readonly() as conn:
+        res_p001 = resumir_produtor(_ctx(conn), 'P001')
+        res_p002 = resumir_produtor(_ctx(conn), 'P002')
+        res_p003 = resumir_produtor(_ctx(conn), 'P003')
+        res_p005 = resumir_produtor(_ctx(conn), 'P005')
+        res_p017 = resumir_produtor(_ctx(conn), 'P017')
+
+    for res in (res_p001, res_p002, res_p005):
+        assert not any('inspecao_adagro' in a.lower() for a in res.alertas)
+        assert not any('não conformidade' in a.lower() for a in res.alertas)
+
+    assert any('laudo_sanitario_queijaria_cicero_p003' in a.lower() for a in res_p003.alertas)
+    assert not any('inspecao_adagro' in a.lower() for a in res_p003.alertas)
+    assert any('inspecao_adagro' in a.lower() for a in res_p017.alertas)
