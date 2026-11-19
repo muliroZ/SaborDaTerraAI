@@ -10,6 +10,8 @@ from streamlit.testing.v1 import AppTest
 import sabor.agent
 from sabor.agent import memoria as sess
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
+from sabor.tools.pedidos import modelo_extracao
+from sabor.triagem import hash_entrada
 
 UI = str(Path(__file__).resolve().parents[2] / 'src' / 'sabor' / 'ui' / 'app.py')
 
@@ -180,16 +182,24 @@ def test_caixa_de_entrada_so_para_a_equipe_e_ordenada_por_urgencia(agente_falso,
             ('PED-UI-3', '2026-10-28 11:00', 'email', 'falhou')
         """
     )
-    conn_temporaria.execute(
-        """
-        INSERT INTO triagem_pedidos (pedido_id, hash_entrada, status, tipo, urgencia, resultado,
-                                     sinalizacoes, erro) VALUES
-            ('PED-UI-1', repeat('a', 64), 'ok', 'cotacao', 'baixa', '{}', '{}', NULL),
-            ('PED-UI-2', repeat('b', 64), 'ok', 'notificacao_oficial', 'critica', '{}',
-             '{conformidade}', NULL),
-            ('PED-UI-3', repeat('c', 64), 'erro', NULL, NULL, NULL, '{}', 'timeout')
-        """
-    )
+    for pid, recebido_em, texto in conn_temporaria.execute(
+        'SELECT id, data_recebimento, mensagem_original FROM pedidos'
+    ).fetchall():
+        conn_temporaria.execute(
+            """
+            INSERT INTO triagem_pedidos (pedido_id, hash_entrada, status, tipo, urgencia,
+                                         resultado, sinalizacoes, erro)
+            SELECT %s, %s, v.status, v.tipo, v.urgencia, v.resultado::jsonb,
+                   v.sinalizacoes::text[], v.erro
+            FROM (VALUES
+                ('PED-UI-1', 'ok', 'cotacao', 'baixa', '{}', '{}', NULL),
+                ('PED-UI-2', 'ok', 'notificacao_oficial', 'critica', '{}', '{conformidade}', NULL),
+                ('PED-UI-3', 'erro', NULL, NULL, NULL, '{}', 'timeout')
+            ) AS v (pedido_id, status, tipo, urgencia, resultado, sinalizacoes, erro)
+            WHERE v.pedido_id = %s
+            """,
+            (pid, hash_entrada(texto, recebido_em, modelo_extracao()), pid),
+        )
 
     assert _botao(_app('P003'), 'Caixa de entrada') is None  # produtor não vê pedidos
 

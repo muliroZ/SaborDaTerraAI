@@ -9,7 +9,7 @@ import json
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelRateLimitError
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from sabor.agent.deps import AgentDeps
@@ -44,17 +44,20 @@ class ModeloFalso:
 
     def __init__(self):
         self.chamadas: list[str] = []
+        self.responde_texto: set[str] = set()  # chaves que respondem fora do formato
 
     def __call__(self, messages, info: AgentInfo) -> ModelResponse:
-        prompt = messages[-1].parts[-1].content
+        prompt = messages[0].parts[-1].content
         chave = next(k for k in EXTRACOES if k in prompt)
         self.chamadas.append(chave)
+        if chave in self.responde_texto:
+            return ModelResponse(parts=[TextPart('não consegui extrair')])
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, EXTRACOES[chave])])
 
 
 @pytest.fixture
 def conn(conn_temporaria):
-    conn_temporaria.execute('TRUNCATE pedidos CASCADE')
+    conn_temporaria.execute('TRUNCATE pedidos, financeiro, produtores CASCADE')
     conn_temporaria.cursor().executemany(
         'INSERT INTO pedidos (id, data_recebimento, canal, remetente, mensagem_original) '
         'VALUES (%s, %s, %s, %s, %s)',
@@ -141,6 +144,63 @@ def test_orcamento_do_lote_esgotado_para_e_retoma_na_proxima_execucao(conn, mode
     assert {f['situacao'] for f in listar_fila(conn)} == {'ok'}
 
 
+def test_regras_rodam_de_novo_sem_tokens_quando_o_banco_muda(conn, modelo):
+    _triar(conn)
+    assert 'inadimplencia' not in listar_fila(conn)[1]['sinalizacoes']
+
+    # Dívida vencida registrada depois da triagem (cenário da revisão do PR).
+    conn.execute(
+        'INSERT INTO produtores (id, nome_completo, municipio, status) '
+        "VALUES ('P001', 'Produtor Teste', 'Garanhuns', 'ativo')"
+    )
+    conn.execute(
+        """
+        INSERT INTO financeiro (id_transacao, data, produtor_id, comprador, produto, quantidade,
+                                unidade, valor_unitario, valor_total, status_pagamento,
+                                data_vencimento)
+        VALUES ('TX-T-1', '2026-09-01', 'P001', 'Mercado Bom Preço', 'Mel', 10, 'kg', 50, 500,
+                'pendente', '2026-09-30')
+        """
+    )
+    segundo = _triar(conn)
+
+    assert len(segundo.reaproveitados) == 3 and not segundo.processados
+    assert len(modelo.chamadas) == 3 and segundo.uso.total_tokens == 0  # sem LLM
+    compra = next(f for f in listar_fila(conn) if f['pedido_id'] == 'PED-T-003')
+    assert {'inadimplencia', 'credito'} <= set(compra['sinalizacoes'])
+
+
+def test_mensagem_alterada_aparece_desatualizada_ate_ser_triada(conn, modelo):
+    _triar(conn)
+    conn.execute(
+        "UPDATE pedidos SET mensagem_original = 'NOTIFICACAO urgente' WHERE id = 'PED-T-001'"
+    )
+
+    # Sem rodar o lote (ou sem orçamento para retriar), a classificação antiga some da fila.
+    for _ in range(2):
+        alterado = next(f for f in listar_fila(conn) if f['pedido_id'] == 'PED-T-001')
+        assert alterado['situacao'] == 'desatualizado'
+        assert alterado['urgencia'] is None and alterado['sinalizacoes'] == []
+        assert listar_fila(conn)[-1]['pedido_id'] == 'PED-T-001'
+        resultado = _triar(conn, limite=0)
+        assert resultado.nao_processados == ['PED-T-001']
+
+    _triar(conn)
+    retriado = next(f for f in listar_fila(conn) if f['pedido_id'] == 'PED-T-001')
+    assert (retriado['situacao'], retriado['urgencia']) == ('ok', 'critica')
+
+
+def test_limite_de_chamadas_do_pedido_nao_interrompe_o_lote(conn, modelo):
+    # Teto do lote abaixo do teto do pedido: antes, qualquer UsageLimitExceeded parava tudo.
+    modelo.responde_texto.add('COTACAO')
+    orcamento = Orcamento(tokens_lote=10_000, tokens_pedido=12_000, requisicoes_pedido=1)
+    resultado = _triar(conn, orcamento=orcamento)
+
+    assert not resultado.orcamento_esgotado and not resultado.nao_processados
+    assert 'chamadas' in resultado.erros['PED-T-001']
+    assert sorted(resultado.processados) == ['PED-T-002', 'PED-T-003']
+
+
 def test_orcamento_por_pedido_registra_erro_e_segue_o_lote(conn, modelo):
     apertado = Orcamento(tokens_lote=None, tokens_pedido=1, requisicoes_pedido=4)
     resultado = _triar(conn, orcamento=apertado)
@@ -158,20 +218,20 @@ def test_limite_de_pedidos_deixa_o_resto_pendente(conn, modelo):
 
 
 def test_erro_temporario_espera_e_tenta_de_novo(conn, modelo, monkeypatch):
-    original = triagem.extrair_e_classificar
+    original = triagem.extrair_pedido
     falhas = {'PED-T-001': 1}
     esperas = []
 
-    async def instavel(deps, *, pedido_id, **kwargs):
-        if falhas.get(pedido_id):
-            falhas[pedido_id] -= 1
+    async def instavel(deps, mensagem, **kwargs):
+        if falhas.get(mensagem.pedido_id):
+            falhas[mensagem.pedido_id] -= 1
             raise ModelRateLimitError('modelo', 'limite por minuto', retry_after=53)
-        return await original(deps, pedido_id=pedido_id, **kwargs)
+        return await original(deps, mensagem, **kwargs)
 
     async def dormir(segundos):
         esperas.append(segundos)
 
-    monkeypatch.setattr(triagem, 'extrair_e_classificar', instavel)
+    monkeypatch.setattr(triagem, 'extrair_pedido', instavel)
     resultado = _triar(conn, esperas_s=(5,), dormir=dormir)
 
     assert len(resultado.processados) == 3 and not resultado.erros
@@ -179,17 +239,17 @@ def test_erro_temporario_espera_e_tenta_de_novo(conn, modelo, monkeypatch):
 
 
 def test_falha_definitiva_nao_derruba_o_lote(conn, modelo, monkeypatch):
-    original = triagem.extrair_e_classificar
+    original = triagem.extrair_pedido
 
-    async def quebra_um(deps, *, pedido_id, **kwargs):
-        if pedido_id == 'PED-T-002':
+    async def quebra_um(deps, mensagem, **kwargs):
+        if mensagem.pedido_id == 'PED-T-002':
             raise ModelRateLimitError('modelo', 'limite por minuto')
-        return await original(deps, pedido_id=pedido_id, **kwargs)
+        return await original(deps, mensagem, **kwargs)
 
     async def dormir(_segundos):
         pass
 
-    monkeypatch.setattr(triagem, 'extrair_e_classificar', quebra_um)
+    monkeypatch.setattr(triagem, 'extrair_pedido', quebra_um)
     resultado = _triar(conn, esperas_s=(1, 1), dormir=dormir)
 
     assert sorted(resultado.processados) == ['PED-T-001', 'PED-T-003']
@@ -207,6 +267,20 @@ def test_exporta_csv_e_json_sem_remetente(conn, modelo):
     assert linhas[0]['urgencia'] == 'critica' and linhas[1]['data_entrega'] == '2026-11-03'
     assert 'remetente' not in linhas[0]
     assert 'compras@x.com' not in texto_csv and '99999' not in texto_csv
+
+    conn.execute("UPDATE triagem_pedidos SET comprador = '=1+1' WHERE pedido_id = 'PED-T-003'")
+    conn.execute(
+        "UPDATE triagem_pedidos SET comprador = '@SUM(A1)', tipo = '-2+3' "
+        "WHERE pedido_id = 'PED-T-002'"
+    )
+    linhas = {
+        linha['pedido_id']: linha
+        for linha in csv.DictReader(io.StringIO(para_csv(listar_fila(conn))), delimiter=';')
+    }
+    assert linhas['PED-T-003']['comprador'] == "'=1+1"  # CSV injection neutralizada
+    assert linhas['PED-T-002']['comprador'] == "'@SUM(A1)"
+    assert linhas['PED-T-002']['tipo'] == "'-2+3"
+    assert linhas['PED-T-003']['data_entrega'] == '2026-11-03'  # valores comuns intactos
 
     dados = json.loads(para_json(fila))
     assert [d['posicao'] for d in dados] == [1, 2, 3]

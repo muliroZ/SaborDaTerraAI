@@ -8,7 +8,8 @@ Uso:
     uv run python scripts/triagem_lote.py --reprocessar        # ignora os resultados gravados
     uv run python scripts/triagem_lote.py --somente-exportar --csv fila.csv   # sem LLM
 
-Pedidos já triados (mesma mensagem, data de referência, modelo e versão) são reaproveitados.
+Pedidos já extraídos (mesma mensagem, recebimento, modelo e versão) não voltam ao LLM: só as
+regras rodam de novo sobre o banco atual, sem tokens.
 O resultado fica em `triagem_pedidos`; rode `scripts/init_db.py` antes para criar a tabela.
 """
 
@@ -88,7 +89,7 @@ def main() -> int:
             uso = resultado.uso
             print(
                 f'\n{len(resultado.processados)} triado(s), {len(resultado.reaproveitados)} '
-                f'reaproveitado(s), {len(resultado.erros)} com erro, '
+                f'reclassificado(s) sem LLM, {len(resultado.erros)} com erro, '
                 f'{len(resultado.nao_processados)} pendente(s). '
                 f'Consumo: {uso.requests} chamada(s), {uso.input_tokens} tokens de entrada, '
                 f'{uso.output_tokens} de saída (teto do lote: {orcamento.tokens_lote}).'

@@ -172,8 +172,9 @@ COMMENT ON COLUMN pedido_itens.ambiguo IS
 -- Resultado de `extrair_e_classificar_pedido` rodado fora do chat sobre todos os
 -- `pedidos` (scripts/triagem_lote.py). Tabela própria: a urgência das regras (#10)
 -- tem quatro níveis e `pedidos.urgencia` guarda outra escala.
--- `hash_entrada` identifica o que gerou o resultado (mensagem, recebimento, data de
--- referência e versão da triagem): enquanto não mudar, o lote reaproveita a linha.
+-- `hash_entrada` identifica a entrada do LLM (mensagem, recebimento, modelo e versão da
+-- triagem): enquanto não mudar, o lote reaproveita `extracao_llm` sem gastar tokens e só
+-- reaplica as regras, que dependem do banco atual (inadimplência, catálogo, certificações).
 
 CREATE TABLE IF NOT EXISTS triagem_pedidos (
     pedido_id       text PRIMARY KEY REFERENCES pedidos (id) ON DELETE CASCADE,
@@ -188,6 +189,7 @@ CREATE TABLE IF NOT EXISTS triagem_pedidos (
     comprador       text,
     data_entrega    date,
     sinalizacoes    text[] NOT NULL DEFAULT '{}',
+    extracao_llm    jsonb,
     resultado       jsonb,
     erro            text,
     modelo          text,
@@ -195,10 +197,19 @@ CREATE TABLE IF NOT EXISTS triagem_pedidos (
     tokens_entrada  integer NOT NULL DEFAULT 0,
     tokens_saida    integer NOT NULL DEFAULT 0,
     processado_em   timestamptz NOT NULL DEFAULT now(),
+    classificado_em timestamptz,
     CHECK (status = 'erro' OR (urgencia IS NOT NULL AND resultado IS NOT NULL))
 );
 
-COMMENT ON COLUMN triagem_pedidos.resultado IS 'Saída completa e validada do modelo Pydantic Pedido.';
+-- Tabelas criadas antes da separação entre extração (LLM) e regras.
+ALTER TABLE triagem_pedidos ADD COLUMN IF NOT EXISTS extracao_llm jsonb;
+ALTER TABLE triagem_pedidos ADD COLUMN IF NOT EXISTS classificado_em timestamptz;
+
+COMMENT ON COLUMN triagem_pedidos.extracao_llm IS
+    'Saída bruta do LLM (Pedido antes do catálogo e das regras), reaproveitada entre lotes.';
+COMMENT ON COLUMN triagem_pedidos.resultado IS
+    'Pedido final (extração + regras de #10), reclassificado a cada lote em classificado_em.';
+COMMENT ON COLUMN triagem_pedidos.processado_em IS 'Última chamada ao LLM para este pedido.';
 COMMENT ON COLUMN triagem_pedidos.erro IS
     'Motivo da falha (ex.: orçamento de tokens esgotado); o próximo lote tenta de novo.';
 

@@ -296,7 +296,8 @@ def dialogo_caixa_entrada() -> None:
     sem_triagem = len(fila) - len(triados)
     if sem_triagem:
         st.warning(
-            f'{sem_triagem} pedido(s) sem triagem (erro ou orçamento esgotado), no fim da fila: '
+            f'{sem_triagem} pedido(s) sem triagem válida (erro, mensagem alterada ou ainda não '
+            'triado), no fim da fila: '
             'rode o lote de novo ou trie manualmente.',
             icon=':material/warning:',
         )
