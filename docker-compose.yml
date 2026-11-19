@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: ${DATABASE_USER:-sabor}
       POSTGRES_DB: ${DATABASE_NAME:-sabor}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-sabor}
       TZ: America/Recife
       PGTZ: America/Recife
     ports:
@@ -18,6 +18,35 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # Aplicação (Streamlit + agente) em container (#17). Fica no perfil `app` para que
+  # `docker compose up -d` continue subindo só o banco no desenvolvimento com `uv run sabor`.
+  #   docker compose --profile app up -d --build
+  #   docker compose --profile app run --rm app python scripts/init_db.py
+  app:
+    profiles: [app]
+    build: .
+    image: sabor-app
+    container_name: sabor-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Dentro da rede do compose o banco é o serviço `db` na porta 5432, não o
+      # localhost/porta publicada do .env; DATABASE_URL vazia faz o app montar a URL abaixo.
+      DATABASE_URL: ''
+      DATABASE_HOST: db
+      DATABASE_PORT: '5432'
+      DATABASE_USER: ${DATABASE_USER:-sabor}
+      DATABASE_NAME: ${DATABASE_NAME:-sabor}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-sabor}
+      PORT: '8501'
+    ports:
+      - '${APP_PORT:-8501}:8501'
 
 volumes:
   pgdata:
