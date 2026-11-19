@@ -19,6 +19,7 @@ from sabor.agent.schemas import (
 )
 from sabor.tools.pedidos import modelo_extracao
 from sabor.triagem import hash_entrada
+from sabor.ui import apresentacao as ap
 
 UI = str(Path(__file__).resolve().parents[2] / 'src' / 'sabor' / 'ui' / 'app.py')
 
@@ -102,14 +103,17 @@ def test_pagina_inicial_sem_conversa(agente_falso):
     at = _app('Seu Antônio')
 
     assert not at.exception
-    assert at.title[0].value == 'Assistente Sabor da Terra'
+    assert at.title[0].value == 'CajAI'
     assert not at.chat_input[0].disabled
     seletor = at.selectbox(key='usuario')
     assert seletor.value == 'Seu Antônio'
     assert len(seletor.options) == 20
     assert 'Data de referência' in _textos(at)
     assert 'Banco conectado' in _textos(at)
+    # Sugestões em balões na área do chat, não mais na sidebar (#56).
     assert at.button(key='sugestao_0') is not None
+    assert all(not (b.key or '').startswith('sugestao') for b in at.sidebar.button)
+    assert 'CajAI' in _textos(at)
 
 
 def test_turno_exibe_resposta_fontes_flags_rascunhos_e_persiste(agente_falso, conn_temporaria):
@@ -167,6 +171,19 @@ def test_sugestao_envia_pergunta(agente_falso):
         == 'Quanto eu vendi em setembro e o que tenho a receber?'
     )
     assert agente_falso.chamadas[-1]['usuario'] == 'P005'
+
+
+def test_sugestoes_seguem_disponiveis_durante_a_conversa(agente_falso):
+    at = _app('P008')
+    at.button(key='sugestao_0').click().run()
+
+    # A saudação com os balões some; as sugestões ficam no botão compacto do fim do chat.
+    with pytest.raises(KeyError):
+        at.button(key='sugestao_0')
+    at.button(key='sugestao_conversa_1').click().run()
+
+    assert not at.exception
+    assert agente_falso.chamadas[-1]['mensagem'] == ap.SUGESTOES_PRODUTOR[1]
 
 
 def test_usuarios_tem_sessoes_isoladas(agente_falso):
@@ -346,3 +363,23 @@ def test_relatorio_sob_demanda_tem_download_e_persiste(agente_falso):
     # Recarregar a página mantém o relatório no histórico (salvo junto com o turno).
     recarregada = _app('Seu Antônio')
     assert len(recarregada.get('download_button')) == 1
+
+
+def test_chat_input_fica_travado_enquanto_turno_executa(agente_falso, monkeypatch):
+    import streamlit as st
+
+    chamadas_input: list[tuple[str | None, bool]] = []
+    chat_input_original = st.chat_input
+
+    def spy_chat_input(*args, **kwargs):
+        chamadas_input.append((kwargs.get('key'), bool(kwargs.get('disabled'))))
+        return chat_input_original(*args, **kwargs)
+
+    monkeypatch.setattr(st, 'chat_input', spy_chat_input)
+    at = _app('P013')
+    chamadas_input.clear()
+    at.chat_input[0].set_value('tenho pedidos?').run()
+
+    assert not at.exception
+    assert chamadas_input == [('entrada_bloqueada', True), ('entrada', False)]
+    assert not at.chat_input[0].disabled

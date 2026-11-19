@@ -49,24 +49,17 @@ def rotulo_usuario(usuario_id: str, nomes_produtores: Mapping[str, str] | None =
 
 SUGESTOES_FUNCIONARIO = (
     'Quais produtores têm certificação orgânica vigente para mel?',
-    'Qual a origem e a rastreabilidade do queijo do lote 2024-089?',
     'Quem a SuperBom está devendo e há quanto tempo?',
-    'Posso mandar frango caipira para o Hotel Fazenda?',
     'Resuma a situação da Maria das Graças e rascunhe uma mensagem para ela.',
-    'Gere o relatório de contas a receber por comprador.',
-    'Monte o dossiê para a inspeção da ADAGRO: o que pediram, o que temos e o que falta.',
-    'Tem dados sobre o PAA?',
 )
-"""Perguntas de referência de `docs/projeto.md` usadas na demonstração."""
+"""Três perguntas representativas (conformidade, financeiro e comunicação) para a tela inicial."""
 
 SUGESTOES_PRODUTOR = (
     'Quanto eu vendi em setembro e o que tenho a receber?',
-    'Tenho pedidos em aberto que eu possa atender?',
     'Minha certificação e meus documentos estão em dia?',
-    'Gere um relatório do que tenho a receber.',
-    'Quanto a Rede SuperBom está devendo para o P003?',
+    'Tenho pedidos em aberto que eu possa atender?',
 )
-"""A última pergunta demonstra o bloqueio de dados de terceiros para o perfil produtor."""
+"""Três perguntas representativas para o perfil produtor."""
 
 
 def sugestoes_para(usuario_id: str) -> tuple[str, ...]:

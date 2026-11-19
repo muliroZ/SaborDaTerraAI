@@ -11,13 +11,13 @@ Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
 - "Nova sessão" oferece o relatório da conversa anterior (#38).
 - Relatórios pedidos no chat (#15) aparecem na resposta com botão de download em Markdown.
 - "Caixa de entrada" (só equipe) mostra a fila da triagem em lote, ordenada por urgência (#14).
+- Sugestões de perguntas em balões na área do chat, abaixo da saudação do CajAI (#56).
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import fields
 import logging
-import os
 import threading
 
 import psycopg
@@ -27,6 +27,7 @@ import streamlit as st
 from sabor.agent import memoria as sess
 from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.deps import obter_data_referencia
+from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor.agent.schemas import Fonte
 from sabor import triagem
@@ -37,6 +38,11 @@ from sabor.ui.relatorio import FUSO, relatorio_da_sessao
 logger = logging.getLogger(__name__)
 
 DATASET_VERSION = next(f.default for f in fields(AgentDeps) if f.name == 'dataset_version')
+
+# Nome e ícone do assistente: título, aba do navegador e avatar das mensagens (#56).
+# (Comentário, não docstring: o "magic" do Streamlit exibiria uma string solta no módulo.)
+NOME_ASSISTENTE = 'CajAI'
+ICONE_ASSISTENTE = ':material/eco:'
 
 
 class TurnoEmAndamento(RuntimeError):
@@ -394,13 +400,26 @@ def dialogo_caixa_entrada() -> None:
     )
 
 
+def render_sugestoes(usuario_id: str, processando: bool, *, prefixo: str = 'sugestao') -> None:
+    """Sugestões de perguntas em balões (chips) que enviam a pergunta ao clicar."""
+    with st.container(horizontal=True, gap='small'):
+        for i, pergunta in enumerate(ap.sugestoes_para(usuario_id)):
+            st.button(
+                pergunta,
+                key=f'{prefixo}_{i}',
+                on_click=enviar,
+                args=(pergunta,),
+                disabled=processando,
+            )
+
+
 def render_sidebar(processando: bool) -> str:
-    """Seletor de usuário, status e sugestões. Devolve o usuário selecionado."""
+    """Seletor de usuário e status. Devolve o usuário selecionado."""
     nomes = nomes_produtores()
     opcoes = list(ap.USUARIOS_SIMULADOS)
     inicial = st.query_params.get('usuario', opcoes[0])
     with st.sidebar:
-        st.subheader('Sabor da Terra')
+        st.subheader('Sabor da Terra', anchor=False)
         usuario_id = st.selectbox(
             'Usuário simulado',
             opcoes,
@@ -449,19 +468,6 @@ def render_sidebar_sessao(sessao: sess.Sessao, processando: bool) -> None:
             if not status['chunks']:
                 st.caption(':orange[Documentos não ingeridos: rode `scripts/ingest_docs.py`.]')
 
-        st.divider()
-        st.markdown('**Sugestões de perguntas**')
-        for i, pergunta in enumerate(ap.sugestoes_para(sessao.usuario_id)):
-            st.button(
-                pergunta,
-                key=f'sugestao_{i}',
-                on_click=enviar,
-                args=(pergunta,),
-                disabled=processando,
-                width='stretch',
-                type='tertiary',
-            )
-
         with conexao() as conn:
             anteriores = sess.listar_sessoes_encerradas(conn, sessao.usuario_id, limite=5)
         if anteriores:
@@ -483,7 +489,7 @@ def render_sidebar_sessao(sessao: sess.Sessao, processando: bool) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title='Sabor da Terra', page_icon=':material/eco:')
+    st.set_page_config(page_title=f'{NOME_ASSISTENTE} · Sabor da Terra', page_icon=ICONE_ASSISTENTE)
     estado = st.session_state
     estado.setdefault('pendente', None)
     estado.setdefault('processando', False)
@@ -504,46 +510,73 @@ def main() -> None:
         )
         st.stop()
 
-    render_sidebar_sessao(sessao, estado.processando)
+    processando = estado.processando or trava_da_sessao(sessao.id).locked()
+    # Bloqueia clique, foco e seleção na caixa inteira do chat enquanto o agente responde.
+    st.html(
+        '<style>'
+        '[data-testid="stElementContainer"]:has([data-testid="stChatInput"] textarea:disabled)'
+        '{cursor:not-allowed;}'
+        '[data-testid="stChatInput"]:has(textarea:disabled)'
+        '{pointer-events:none!important;user-select:none!important;opacity:0.5;}'
+        '</style>'
+    )
+    placeholder = 'Pergunte sobre pedidos, produtores, lotes, safra…'
+    st.chat_input(
+        'Aguarde a resposta…' if processando else placeholder,
+        key='entrada_bloqueada' if processando else 'entrada',
+        on_submit=None if processando else enviar,
+        disabled=processando,
+        submit_mode='disable',
+        max_chars=obter_limites_configurados()['max_caracteres'],
+    )
+
+    render_sidebar_sessao(sessao, processando)
 
     perfil = 'produtor' if ap.eh_produtor(usuario_id) else 'equipe da cooperativa'
-    st.title('Assistente Sabor da Terra')
+    st.title(NOME_ASSISTENTE, anchor=False, icon=ICONE_ASSISTENTE)
     inicio = sessao.criada_em.astimezone(FUSO)
     st.caption(f'{usuario_id} · {perfil} · sessão iniciada em {inicio:%d/%m %H:%M}')
     if aviso := estado.pop('aviso', None):
         st.warning(aviso, icon=':material/warning:')
 
-    if not mensagens and not estado.pendente:
-        with st.chat_message('assistant'):
-            st.markdown(
-                'Olá! Posso interpretar pedidos, consultar certificações, lotes, safra, preços e '
-                'financeiro, e preparar resumos e rascunhos para produtores. '
-                'Escreva sua pergunta abaixo ou use uma sugestão ao lado.'
-            )
+    boas_vindas = st.empty()
+    if not mensagens and not processando:
+        with boas_vindas.container():
+            with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
+                st.markdown(
+                    f'Olá! Sou o **{NOME_ASSISTENTE}**, assistente da Cooperativa Sabor da Terra. '
+                    'Posso interpretar pedidos, consultar certificações, lotes, safra, preços e '
+                    'financeiro, e preparar resumos e rascunhos para produtores. '
+                    'Escreva sua pergunta abaixo ou escolha uma sugestão:'
+                )
+                render_sugestoes(usuario_id, processando)
+    else:
+        boas_vindas.empty()
 
     for msg in mensagens:
         if msg.papel == 'usuario':
             with st.chat_message('user'):
                 st.markdown(msg.texto)
         elif msg.turno is not None:
-            with st.chat_message('assistant'):
+            with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
                 render_resposta(msg.turno, usuario_id, chave=str(msg.id))
 
-    placeholder = 'Pergunte sobre pedidos, produtores, lotes, safra…'
-    st.chat_input(
-        'Aguarde a resposta…' if estado.processando else placeholder,
-        key='entrada',
-        on_submit=enviar,
-        disabled=estado.processando,
-        submit_mode='disable',
-        max_chars=int(os.getenv("GUARDRAIL_MAX_CHARS", "750")),
-    )
+    atalho_sugestoes = st.empty()
+    if mensagens and not processando:
+        # Com a conversa em andamento, as sugestões ficam num botão compacto no fim do chat.
+        with atalho_sugestoes.container():
+            with st.popover(
+                'Sugestões de perguntas', icon=':material/lightbulb:', type='tertiary'
+            ):
+                render_sugestoes(usuario_id, processando, prefixo='sugestao_conversa')
+    else:
+        atalho_sugestoes.empty()
 
     if estado.pendente:
         mensagem = estado.pendente
         with st.chat_message('user'):
             st.markdown(mensagem)
-        with st.chat_message('assistant'):
+        with st.chat_message('assistant', avatar=ICONE_ASSISTENTE):
             try:
                 with st.spinner('Consultando dados e documentos…'):
                     executar_turno(sessao.id, usuario_id, mensagem)

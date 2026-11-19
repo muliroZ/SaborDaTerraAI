@@ -20,7 +20,7 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded
 )
-from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart, ToolReturnPart
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
@@ -328,6 +328,47 @@ def _mascarar_historico_json(serializado: str, mascarar: Callable[[str], str]) -
     return json.dumps(percorrer(dados), ensure_ascii=False, separators=(',', ':'))
 
 
+def _coletar_fontes_valor(
+    valor: Any, destino: list[str], *, aceitar_str: bool = False
+) -> None:
+    if valor is None:
+        return
+    if hasattr(valor, 'model_dump'):
+        valor = valor.model_dump()
+    if isinstance(valor, dict):
+        arquivo = valor.get('arquivo')
+        referencia = valor.get('referencia')
+        if isinstance(arquivo, str) and arquivo.strip():
+            ref = (
+                f' {referencia.strip()}'
+                if isinstance(referencia, str) and referencia.strip()
+                else ''
+            )
+            destino.append(f'{arquivo.strip()}{ref}')
+        for chave in ('fontes', 'fonte'):
+            if chave in valor:
+                _coletar_fontes_valor(valor[chave], destino, aceitar_str=True)
+        for k, v in valor.items():
+            if k not in ('arquivo', 'referencia', 'fontes', 'fonte') and isinstance(
+                v, (dict, list, tuple)
+            ):
+                _coletar_fontes_valor(v, destino, aceitar_str=False)
+    elif isinstance(valor, (list, tuple)):
+        for item in valor:
+            _coletar_fontes_valor(item, destino, aceitar_str=aceitar_str)
+    elif aceitar_str and isinstance(valor, str) and valor.strip():
+        destino.append(valor.strip())
+
+
+def _extrair_fontes_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[str]:
+    fontes: list[str] = []
+    for msg in novas_mensagens:
+        for part in getattr(msg, "parts", None) or ():
+            if isinstance(part, ToolReturnPart):
+                _coletar_fontes_valor(part.content, fontes)
+    return fontes
+
+
 def processar_turno(
     sessao_id: str,
     mensagem: str,
@@ -531,7 +572,7 @@ def processar_turno(
                 conn_propria.rollback()
 
         # Guardrail de saída aqui!
-        fontes_turno = [f'{f.arquivo} · {f.referencia}' for f in resposta_final.fontes]
+        fontes_turno = _extrair_fontes_das_tools(resultado.new_messages())
         resposta_final, regras_saida = processar_guardrail_saida(
             resposta_final,
             conn=deps_exec.conn,
@@ -575,8 +616,13 @@ def processar_turno(
         latencia_ms=latencia_ms,
     )
     bloqueado_guardrail_saida = bool(regras_saida)
-    if bloqueado_guardrail_saida:
-        turno = turno.model_copy(update={'bloqueado_guardrail': True})
+    if regras_saida:
+        turno = turno.model_copy(
+            update={
+                "bloqueado_guardrail": True,
+                "regras_disparadas": list(regras_saida),
+            }
+        )
 
     if registrar_auditoria is not None:
         registrar_auditoria(turno)
