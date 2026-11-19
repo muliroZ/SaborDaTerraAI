@@ -133,15 +133,25 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
         requisicoes = sess.contar_turnos(conn, sessao_id)
     max_turnos = sess.max_turnos_memoria()
     gravado = False
+    erro_persistencia = False
 
     def carregar_memoria(sid: str) -> list[ModelMessage]:  # Etapa 1
-        with conexao() as conn:
-            return sess.carregar_historico(conn, sid, max_turnos)
+        nonlocal erro_persistencia
+        try:
+            with conexao() as conn:
+                return sess.carregar_historico(conn, sid, max_turnos)
+        except psycopg.Error:
+            erro_persistencia = True
+            raise
 
     def salvar_memoria(sid: str, msg: str, turno: RespostaTurno) -> None:  # Etapa 5b
-        nonlocal gravado
-        with conexao() as conn:
-            sess.registrar_turno(conn, sid, msg, turno)
+        nonlocal gravado, erro_persistencia
+        try:
+            with conexao() as conn:
+                sess.registrar_turno(conn, sid, msg, turno)
+        except psycopg.Error:
+            erro_persistencia = True
+            raise
         gravado = True
 
     try:
@@ -154,9 +164,9 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
             carregar_memoria=carregar_memoria,
             salvar_memoria=salvar_memoria,
         )
-    except psycopg.Error:
-        raise  # banco fora: a página avisa que não conseguiu gravar
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, psycopg.Error) and erro_persistencia:
+            raise  # banco fora ao ler/gravar memória: a página avisa que não conseguiu gravar
         # Erro fora dos tratados pelo orquestrador: responde com falha segura e grava, se o
         # hook não chegou a gravar, para a pergunta não sumir do histórico.
         logger.exception('Falha inesperada no turno da sessão %s', sessao_id)

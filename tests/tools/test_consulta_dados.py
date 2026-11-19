@@ -107,6 +107,104 @@ def test_padrao_numero_nao_acha_nada_em_texto_sem_numero_de_lote():
     assert _PADRAO_NUMERO.search('me manda o queijo de sempre') is None
 
 
+def test_buscar_produtores_filtra_por_id_e_nome_e_respeita_rbac():
+    class _CursorFake:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _ConnFake:
+        def __init__(self):
+            self.chamadas = []
+
+        def execute(self, sql, params=()):
+            self.chamadas.append((sql, list(params)))
+            return _CursorFake(
+                [
+                    (
+                        'P003',
+                        'Cícero Romão de Almeida',
+                        '723.016.498-55',
+                        '(87) 99999-0000',
+                        'cicero@example.com',
+                        'Garanhuns',
+                        False,
+                        None,
+                        'ativo',
+                        '723.016.498-55',
+                        'BB',
+                        '0001',
+                        '12345-6',
+                        'DAP-1',
+                        'PE-SIE-001',
+                        ['queijo coalho'],
+                    )
+                ]
+            )
+
+    conn = _ConnFake()
+    res = buscar_produtores(_ctx_funcionario(conn), produtor_id='p003', nome='Cícero')
+    assert len(res) == 1
+    assert res[0].id == 'P003'
+    assert res[0].nome_completo == 'Cícero Romão de Almeida'
+    sql, params = conn.chamadas[0]
+    assert 'p.id = %s' in sql
+    assert 'p.nome_completo ILIKE %s' in sql
+    assert params == ['P003', '%Cícero%']
+
+    with pytest.raises(SemPermissao):
+        buscar_produtores(_ctx_produtor(conn, 'P001'), produtor_id='P003')
+
+
+def test_consultar_financeiro_retorna_produtor_nome_e_dias_atraso():
+    class _CursorFake:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _ConnFake:
+        def __init__(self):
+            self.chamadas = []
+
+        def execute(self, sql, params=()):
+            self.chamadas.append((sql, list(params)))
+            return _CursorFake(
+                [
+                    (
+                        'FIN-2026-013',
+                        date(2026, 9, 18),
+                        'P003',
+                        'Rede SuperBom Atacado',
+                        'queijo coalho',
+                        150,
+                        'kg',
+                        30.0,
+                        4500.0,
+                        'pendente',
+                        date(2026, 10, 18),
+                        None,
+                        False,
+                        '723.016.498-55',
+                        'Cícero Romão de Almeida',
+                    )
+                ]
+            )
+
+    conn = _ConnFake()
+    resumo = consultar_financeiro(_ctx_funcionario(conn), comprador='SuperBom', status='vencido')
+    assert len(resumo.itens) == 1
+    item = resumo.itens[0]
+    assert item.produtor_id == 'P003'
+    assert item.produtor_nome == 'Cícero Romão de Almeida'
+    assert item.vencido is True
+    assert item.dias_atraso == 12
+    assert 'JOIN produtores p ON p.id = f.produtor_id' in conn.chamadas[0][0]
+
+
 # =============================================================================
 # 3. Integração — perguntas de referência (docs/projeto.md)
 # =============================================================================
@@ -153,7 +251,9 @@ def test_pergunta_4_superbom_devendo_p003(conn):
     resumo = consultar_financeiro(_ctx_funcionario(conn), comprador='SuperBom', status='vencido')
     assert resumo.total_vencido == pytest.approx(6020.00)
     assert {item.produtor_id for item in resumo.itens} == {'P003'}
+    assert {item.produtor_nome for item in resumo.itens} == {'Cícero Romão de Almeida'}
     assert all(item.data_vencimento < DATA_REF for item in resumo.itens)
+    assert all(item.dias_atraso == (DATA_REF - item.data_vencimento).days for item in resumo.itens)
 
 
 def test_pergunta_5_caja_novembro_disponibilidade_baixa(conn):

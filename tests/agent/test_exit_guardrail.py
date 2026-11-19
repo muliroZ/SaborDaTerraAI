@@ -41,3 +41,36 @@ def test_guardrail_saida_4b_exige_fonte_factual():
     res_proc, regras = processar_guardrail_saida(resposta_mock, fontes_retornadas_no_turno=[])
     assert any("4B_SEM_FONTE_FACTUAL" in r for r in regras)
     assert "não encontrada" in res_proc.texto.lower()
+
+
+def test_guardrail_saida_4b_aceita_fonte_formatada_com_ponto_medio():
+    """Regressão: fonte 'arquivo · referencia' deve casar com RespostaAgente.fontes."""
+    from sabor.agent.schemas import Fonte
+
+    resposta_mock = RespostaAgente(
+        texto="Produtor P001 vendeu R$ 1.090,00.",
+        fontes=[Fonte(arquivo="financeiro.csv", referencia="FIN-2026-001")],
+    )
+    res_proc, regras = processar_guardrail_saida(
+        resposta_mock,
+        fontes_retornadas_no_turno=["financeiro.csv · FIN-2026-001"],
+    )
+    assert regras == []
+    assert res_proc.texto == "Produtor P001 vendeu R$ 1.090,00."
+    assert len(res_proc.fontes) == 1
+
+
+def test_guardrail_saida_4b_rejeita_fonte_nao_retornada_no_turno():
+    """Fonte citada na resposta que não veio nas ferramentas do turno continua sendo barrada."""
+    from sabor.agent.schemas import Fonte
+
+    resposta_mock = RespostaAgente(
+        texto="O preço do mel orgânico é R$ 42,00.",
+        fontes=[Fonte(arquivo="tabela_precos_outubro_2026.csv", referencia="Mel")],
+    )
+    res_proc, regras = processar_guardrail_saida(
+        resposta_mock,
+        fontes_retornadas_no_turno=["financeiro.csv · FIN-2026-001"],
+    )
+    assert any("4B_SEM_FONTE_FACTUAL" in r for r in regras)
+    assert res_proc.fontes == []

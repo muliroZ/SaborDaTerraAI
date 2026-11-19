@@ -9,6 +9,7 @@ import os
 import re
 from typing import Any, Optional
 
+from dotenv import load_dotenv
 from pydantic_ai.usage import UsageLimits
 from sabor.agent.schemas import RetornoAntecipado
 
@@ -59,20 +60,23 @@ MENSAGEM_ORCAMENTO_TURNO = (
 
 
 def obter_limites_configurados() -> dict[str, int]:
+    load_dotenv()
+
     def _parse_env(var_name: str, default_val: str) -> int:
         val = os.getenv(var_name)
         if not val or not val.strip():
             val = default_val
         try:
-            return int(val)
+            parsed = int(val.strip())
+            return parsed if parsed > 0 else int(default_val)
         except (ValueError, TypeError):
             return int(default_val)
 
     return {
         "max_caracteres": _parse_env("GUARDRAIL_MAX_CHARS", "750"),
         "sessao_request_limit": _parse_env("SESSAO_REQUEST_LIMIT", "50"),
-        "turno_request_limit": _parse_env("TURNO_REQUEST_LIMIT", "7"),
-        "turno_tokens_limit": _parse_env("TURNO_TOKENS_LIMIT", "12000"),
+        "turno_request_limit": _parse_env("TURNO_REQUEST_LIMIT", "8"),
+        "turno_tokens_limit": _parse_env("TURNO_TOKENS_LIMIT", "32000"),
     }
 
 

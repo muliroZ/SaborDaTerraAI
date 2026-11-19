@@ -239,3 +239,24 @@ def test_erro_inesperado_grava_falha_segura_uma_vez(app_modulo, conn_temporaria,
         'pergunta 2',
         'ok',
     ]
+
+
+def test_erro_psycopg_interno_no_turno_nao_mascara_como_falha_ao_gravar(
+    app_modulo, conn_temporaria, monkeypatch
+):
+    import psycopg
+
+    app, _ = app_modulo
+    sessao = sess.criar_sessao(conn_temporaria, 'P012')
+
+    def explode_conexao_interna(*args, **kwargs):
+        raise psycopg.OperationalError('the connection is closed')
+
+    monkeypatch.setattr(app, 'processar_turno', explode_conexao_interna)
+    turno = app.executar_turno(sessao.id, 'P012', 'pergunta com erro interno de banco')
+    assert turno.falha_segura is True
+    mensagens = sess.listar_mensagens(conn_temporaria, sessao.id)
+    assert [m.texto for m in mensagens] == [
+        'pergunta com erro interno de banco',
+        app.MENSAGEM_FALHA_SEGURA,
+    ]
