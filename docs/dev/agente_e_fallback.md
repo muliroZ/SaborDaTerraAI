@@ -20,6 +20,7 @@ scripts/
 ├── init_db.py      #Iniciar banco
 ├── etl.py          #Dados dos csv. para o banco
 ├── ingest_docs.py  #Dados dos txt. para o banco (embeddings)
+├── limpar_cache.py #Limpa o cache de respostas estáticas (--expirados: só as vencidas) (#36)
 
 src/sabor/
 ├── __init__.py              # `uv run sabor` abre a interface Streamlit
@@ -45,6 +46,7 @@ src/sabor/
     ├── deps.py              # Contexto injetado: AgentDeps, obter_data_referencia() e MascaradorNoOp
     ├── fallback.py          # Cadeia ModelFallback (Gemini -> Qwen3 -> Mistral), gatilhos e metadados reais (#37)
     ├── guardrails.py        # Guardrail de entrada determinístico: escopo, tamanho, prompt injection, cache hook e limites (Etapa 2)
+    ├── cache.py             # Cache de respostas estáticas em tabela UNLOGGED: chave, elegibilidade e CacheRespostas (2b/5b, #36)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)
     ├── memoria.py           # Sessões e mensagens no PostgreSQL + message_history da sessão (camada mínima de #31)
     └── runner.py            # Fábrica criar_agente(), descoberta dinâmica de tools e processar_turno() (Etapas 1 a 5)
@@ -63,6 +65,7 @@ tests/
 │   ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
 │   ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
 │   ├── test_memoria.py      # Sessão ativa, memória dos últimos N turnos, isolamento por "Nova sessão" (#31)
+│   ├── test_cache.py        # Cache de respostas: chave, elegibilidade, critério de aceite e tabela UNLOGGED (#36)
 │   └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
 └── tools/
     ├── conftest.py              # Fixtures compartilhadas do pytest (conexão/banco populado para os testes das tools)
@@ -111,7 +114,8 @@ Consolida a `RespostaAgente` + metadados técnicos e de auditoria:
 - `sessao_id: str`, `usuario: str`
 - `texto: str`, `fontes: list[Fonte]`, `flags: list[Flag]`, `rascunhos: list[Rascunho]`, `relatorios: list[Relatorio]`
 - `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente por bloqueio na Etapa 2 (ou quando estoura `UsageLimits`).
-- `retorno_antecipado: RetornoAntecipado | None` — Objeto padronizado com `motivo` (`ENTRADA_VAZIA`, `TAMANHO_EXCEDIDO`, `FORA_DE_ESCOPO`, `PROMPT_INJECTION`, `CACHE_HIT`, `COTA_SESSAO_ESGOTADA`, `ORCAMENTO_TURNO_ESGOTADO`), `mensagem` e `fontes`.
+- `cache_hit: bool` — `True` quando a resposta veio do cache de respostas estáticas (2b, `#36`), sem chamar o LLM; a auditoria (`#35`) grava esse valor na coluna `auditoria_mensagens.cache_hit`.
+- `retorno_antecipado: RetornoAntecipado | None` — Objeto padronizado com `motivo` (`ENTRADA_VAZIA`, `TAMANHO_EXCEDIDO`, `FORA_DE_ESCOPO`, `PROMPT_INJECTION`, `CACHE_HIT`, `COTA_SESSAO_ESGOTADA`, `ORCAMENTO_TURNO_ESGOTADO`), `mensagem`, `fontes` e `flags` (as duas últimas preenchidas no `CACHE_HIT`).
 
 ---
 
@@ -236,10 +240,20 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Onde está implementado (Etapa 2):** [`src/sabor/agent/guardrails.py`](../../src/sabor/agent/guardrails.py), integrado em [`runner.py`](../../src/sabor/agent/runner.py) e [`schemas.py`](../../src/sabor/agent/schemas.py).
 - **Como funciona a Etapa 2:**
   1. **2a (Escopo, Tamanho e Prompt Injection):** Bloqueia deterministicamente mensagens vazias, acima do limite (`GUARDRAIL_MAX_CHARS`, padrão `4000`), assuntos fora do domínio da cooperativa e tentativas de *prompt injection* sem consumir tokens do LLM (`modelo_efetivo=None`).
-  2. **2b (Gancho de Cache Estático — `#36`):** Gera o hash SHA-256 normalizado (`dataset_version + pergunta`) e consulta `cache_repo.buscar_por_hash(...)` quando injetado em `processar_turno(..., cache_repo=...)`, devolvendo `RetornoAntecipado(motivo="CACHE_HIT")` com `bloqueado_guardrail=False`.
+  2. **2b (Cache de Respostas Estáticas — `#36`):** ver a seção da `#36` abaixo. Hit devolve `RetornoAntecipado(motivo="CACHE_HIT")` com `bloqueado_guardrail=False` e `cache_hit=True`, sem chamar o LLM.
   3. **2c (Orçamento de Turno e Cota por Sessão):** Verifica o limite de requisições por sessão (`SESSAO_REQUEST_LIMIT`, padrão `50`) antes do LLM e injeta `UsageLimits(request_limit=..., total_tokens_limit=...)` no `agente.run_sync`. Caso ocorra `UsageLimitExceeded`, captura a exceção sem *stack trace* na UI e devolve `RetornoAntecipado(motivo="ORCAMENTO_TURNO_ESGOTADO")` sem afetar o turno seguinte.
   4. **Pós-processamento garantido:** Todos os retornos antecipados passam pelos hooks de auditoria (`#35`) e memória (`#31`).
 - **O que falta para a Etapa 4 (`pos_processar` — `#34`):** Hook `(RespostaAgente) -> RespostaAgente` em `processar_turno` chamado logo após a restauração de PII, reaproveitando `src/sabor/tools/regras.py` (`#10`) para aplicar travas determinísticas de saída (bloqueios obrigatórios de `P017`, `P008` e exigência de fonte factual).
+
+---
+
+### ⚡ Issue `#36` — Cache de Respostas Estáticas em Tabela `UNLOGGED` (Etapas 2b e 5b)
+- **Onde está implementado:** [`src/sabor/agent/cache.py`](../../src/sabor/agent/cache.py), tabela `cache_respostas` em [`schema.sql`](../../src/sabor/sql/schema.sql), integrado em `guardrail_entry.verificar_cache_estatico` (2b) e no fim do `processar_turno` (5b). A interface injeta `cache_repo=CacheRespostas(conexao)`.
+- **Por que `UNLOGGED`:** Redis foi descartado na reunião de 16/11. A tabela não escreve WAL (mais rápida) e o PostgreSQL a esvazia após um crash, o que é aceitável para cache.
+- **Chave:** SHA-256 de pergunta normalizada (minúsculas, sem acento e sem pontuação) + perfil + versão do dataset (`dataset_metadata`) + data de referência (`DATA_REF_DATE`). Nova carga de dados publica outra versão e as chaves antigas deixam de ser encontradas. Com versão `sha256-unavailable` o cache não é usado.
+- **2b (leitura):** só para o perfil `funcionario` e fora de contexto multi-turno (primeira pergunta da sessão ou pergunta autocontida, pela heurística `pergunta_autocontida`). Hit conta em `hits`, responde com as mesmas fontes e flags e zero tokens.
+- **5b (gravação):** só respostas estáticas e seguras (`resposta_cacheavel`): sem dados pessoais na pergunta, no texto, nas flags e nas fontes (detectados pelo `Mascarador`, `#33`), sem retorno antecipado, sem bloqueio/regras do guardrail de saída, sem falha segura e sem rascunhos ou relatórios; mais as mesmas condições de perfil e contexto da leitura. Falha no banco do cache só gera log: o turno segue normalmente.
+- **Configuração e limpeza:** `CACHE_TTL_S` (padrão `86400`, 24 h; `0` desliga). `uv run python scripts/limpar_cache.py` remove tudo; `--expirados` remove só as vencidas (cada gravação também descarta as expiradas).
 
 ---
 
@@ -257,7 +271,8 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 
 ### 📋 Issue `#35` — Auditoria por Mensagem: Tabela e Gravação (Etapa 5a)
 - **O que já está pronto no agente:**
-  - O `RespostaTurno` já entrega prontos: `sessao_id`, `usuario`, `texto`, `fontes`, `flags`, `modelo_efetivo`, `provedor_efetivo`, `tentativas_fallback`, `bloqueado_guardrail`, `falha_segura` e `latencia_ms`.
+  - O `RespostaTurno` já entrega prontos: `sessao_id`, `usuario`, `texto`, `fontes`, `flags`, `modelo_efetivo`, `provedor_efetivo`, `tentativas_fallback`, `bloqueado_guardrail`, `falha_segura`, `cache_hit` (`#36`) e `latencia_ms`.
+  - A coluna `auditoria_mensagens.cache_hit` (`boolean`, padrão `false`) já existe no schema (`#36`).
 - **O que a Issue `#35` precisa fazer quando ficar pronta:**
   - Implementar a função `registrar_auditoria(turno: RespostaTurno) -> None` que faz o `INSERT INTO auditoria_mensagens` (usando `conectar()` normal de escrita) e plugá-la no parâmetro `registrar_auditoria` do `processar_turno`.
 
