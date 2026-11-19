@@ -206,6 +206,8 @@ def test_processar_turno_falha_segura_quando_todos_provedores_falham():
 
     assert turno.falha_segura is True
     assert turno.bloqueado_guardrail is False
+    assert turno.modelo_efetivo is None
+    assert turno.provedor_efetivo is None
     assert turno.texto == MENSAGEM_FALHA_SEGURA
     assert [t.modelo for t in turno.tentativas_fallback] == [MODELO_PRIMARIO, MODELO_FALLBACK_1]
     assert len(auditoria_recebida) == 1

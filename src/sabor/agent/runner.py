@@ -526,9 +526,6 @@ def processar_turno(
                 cache_hit=eh_cache_hit,
                 latencia_ms=latencia_ms,
             )
-            turno_antecipado = turno_antecipado.model_copy(
-                update={'cache_hit': eh_cache_hit}
-            )
             persistir_e_auditar(turno_antecipado)
             return turno_antecipado
 
@@ -623,13 +620,6 @@ def processar_turno(
         )
         # Grava também a falha segura para o histórico exibido ficar coerente; a memória
         # (#31) não a repassa ao modelo nos turnos seguintes.
-        if tentativas_erro:
-            turno_falha = turno_falha.model_copy(
-                update={
-                    'modelo_efetivo': tentativas_erro[-1].modelo,
-                    'provedor_efetivo': tentativas_erro[-1].provedor,
-                }
-            )
         persistir_e_auditar(turno_falha)
         return turno_falha
 

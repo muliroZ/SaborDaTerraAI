@@ -414,9 +414,6 @@ CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_i
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
 CREATE INDEX IF NOT EXISTS auditoria_criada_idx ON auditoria_mensagens (criada_em DESC);
 
--- Turno respondido pelo cache de respostas estáticas, sem chamar o LLM (2b, #36).
-ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS cache_hit boolean NOT NULL DEFAULT false;
-
 -- ---------------------------------------------------------------------------
 -- Cache de respostas estáticas (etapas 2b e 5b — #36)
 -- ---------------------------------------------------------------------------

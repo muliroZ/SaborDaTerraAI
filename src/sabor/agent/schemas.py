@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from typing import Literal, Optional
+from typing import Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
@@ -129,7 +129,6 @@ class RespostaTurno(BaseModel):
     ferramentas: list[str] = Field(default_factory=list)
     tokens_entrada: int | None = None
     tokens_saida: int | None = None
-    cache_hit: bool = False
     trace_id: str = Field(default_factory=lambda: str(uuid4()))
     
     @classmethod
