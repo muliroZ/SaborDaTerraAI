@@ -12,6 +12,7 @@ Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
 - Relatórios pedidos no chat (#15) aparecem na resposta com botão de download em Markdown.
 - "Caixa de entrada" (só equipe) mostra a fila da triagem em lote, ordenada por urgência (#14).
 - Sugestões de perguntas em balões na área do chat, abaixo da saudação do CajAI (#56).
+- Perguntas repetidas da equipe saem do cache de respostas estáticas, sem chamar o LLM (#36).
 """
 
 from collections.abc import Iterator
@@ -26,6 +27,7 @@ import streamlit as st
 
 from sabor.agent import memoria as sess
 from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
+from sabor.agent.cache import CacheRespostas
 from sabor.agent.deps import obter_data_referencia
 from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
@@ -173,6 +175,7 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
             usuario_id,
             agente=agente(),
             requisicoes_na_sessao=requisicoes,
+            cache_repo=CacheRespostas(conexao),
             carregar_memoria=carregar_memoria,
             salvar_memoria=salvar_memoria,
         )
