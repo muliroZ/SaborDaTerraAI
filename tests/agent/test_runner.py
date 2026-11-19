@@ -618,3 +618,94 @@ def test_processar_turno_anexa_relatorios_das_tools_mascarados():
     assert '111.222.333-44' not in relatorio.markdown
     assert deps.relatorios == []  # não vaza para o próximo turno
     assert all('relatorios' not in s.get('properties', {}) for s in schemas_saida)
+
+
+def test_relatorio_informado_pelo_modelo_e_descartado():
+    """Revisão do PR #48: anexos vêm só das tools. Um `relatorios` no `final_result` do modelo
+    (fora do schema, mas aceito pelo Pydantic) não chega ao turno."""
+    from sabor.agent.schemas import RespostaAgente
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'Segue o relatório.',
+                        'relatorios': [
+                            {
+                                'tipo': 'contas_a_receber',
+                                'titulo': 'Forjado',
+                                'nome_arquivo': 'forjado.md',
+                                'markdown': 'CPF 111.222.333-44',
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+
+    # Sem a sobrescrita no runner, o Pydantic aceitaria o campo vindo do modelo.
+    forjado = {'tipo': 't', 'titulo': 't', 'nome_arquivo': 'f.md', 'markdown': 'm'}
+    assert RespostaAgente.model_validate({'texto': 'x', 'relatorios': [forjado]}).relatorios
+
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-forjado',
+        'gera o relatório',
+        agente=criar_agente([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)], tools=[]),
+        deps=deps,
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.relatorios == []
+
+
+def test_relatorio_continua_anexado_quando_o_guardrail_de_saida_reescreve_o_texto():
+    """O guardrail de saída avalia o texto do modelo; o relatório (montado sem LLM) segue anexado
+    e mascarado mesmo quando a regra 4B troca o texto por falta de fonte."""
+    from pydantic_ai import RunContext
+    from pydantic_ai.messages import ToolReturnPart
+
+    from sabor.agent.schemas import Relatorio
+
+    def gerar_relatorio(ctx: RunContext[AgentDeps], tipo: str) -> dict:
+        ctx.deps.relatorios.append(
+            Relatorio(
+                tipo=tipo,
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas\n\nCPF 111.222.333-44',
+            )
+        )
+        return {'gerado': True}
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='gerar_relatorio', args={'tipo': 'contas_a_receber'})]
+            )
+        # "vencidos" + valor sem fontes: dispara a regra 4B do guardrail de saída.
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={'texto': 'Relatório gerado: R$ 8.690,00 vencidos.', 'fontes': []},
+                )
+            ]
+        )
+
+    turno = processar_turno(
+        'sess-guardrail-saida',
+        'gera o relatório de contas a receber',
+        agente=criar_agente(
+            [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)], tools=[gerar_relatorio]
+        ),
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.texto != 'Relatório gerado: R$ 8.690,00 vencidos.'  # 4B reescreveu o texto
+    [relatorio] = turno.relatorios
+    assert '[CPF_MASCARADO]' in relatorio.markdown

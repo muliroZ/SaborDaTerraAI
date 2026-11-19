@@ -167,6 +167,10 @@ def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAge
     O Markdown passa pelo mascarador como rede de segurança (o arquivo pode sair da
     cooperativa, como o dossiê da ADAGRO) e, como os rascunhos, não tem a PII restaurada.
     Se a mesma tool rodou mais de uma vez, fica a última versão de cada arquivo.
+
+    O guardrail de saída avalia o texto do modelo e não remove os relatórios: o conteúdo deles
+    é montado sem LLM, a partir das tools. A regra 4A, por exemplo, barra qualquer texto que
+    cite o P008 junto de "vigente", inclusive o resumo correto que o aponta como vencido.
     """
     lista = getattr(deps, 'relatorios', None)
     gerados = [r for r in lista if isinstance(r, Relatorio)] if isinstance(lista, list) else []
