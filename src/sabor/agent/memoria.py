@@ -163,26 +163,28 @@ def listar_sessoes_encerradas(
 def registrar_turno(
     conn: psycopg.Connection, sessao_id: str, mensagem: str, turno: RespostaTurno,
     historico_modelo_json: str | None = None,
-) -> None:
+) -> int:
     """Etapa 5b: grava a pergunta e a resposta do turno, inclusive retornos antecipados e
     falha segura, para o histórico exibido na interface ficar coerente."""
     with conn.transaction():
-        with conn.cursor() as cur:
-            cur.executemany(
-                'INSERT INTO mensagens (sessao_id, papel, conteudo) VALUES (%s, %s, %s)',
-                [
-                    (sessao_id, 'usuario', Jsonb({'texto': mensagem})),
-                    (
-                        sessao_id,
-                        'assistente',
-                        Jsonb({
-                            **turno.model_dump(mode='json'),
-                            **({'historico_modelo_json': historico_modelo_json}
-                               if historico_modelo_json else {}),
-                        }),
-                    ),
-                ],
+        conn.execute(
+            'INSERT INTO mensagens (sessao_id, papel, conteudo) VALUES (%s, %s, %s)',
+            (sessao_id, 'usuario', Jsonb({'texto': mensagem})),
+        )
+        row = conn.execute(
+            'INSERT INTO mensagens (sessao_id, papel, conteudo) VALUES (%s, %s, %s) '
+            'RETURNING id',
+            (
+                sessao_id,
+                'assistente',
+                Jsonb({
+                    **turno.model_dump(mode='json'),
+                    **({'historico_modelo_json': historico_modelo_json}
+                       if historico_modelo_json else {}),
+                }),
             )
+        ).fetchone()
+    return int(row[0])
 
 
 def _mensagem(row: Sequence[Any]) -> Mensagem:

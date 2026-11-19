@@ -51,7 +51,46 @@ erDiagram
     COMPRADOR ||--o{ TRANSACAO : "nome (texto)"
     COMPRADOR ||--o| CONTRATO : "nome (texto)"
     COMPRADOR ||--o{ PEDIDO : "nome (texto livre)"
+    SESSAO ||--o{ MENSAGEM : "sessao_id"
+    MENSAGEM ||--o| AUDITORIA_MENSAGEM : "message_id"
+    SESSAO {
+        string id PK
+        string usuario_id
+        string perfil
+        timestamp criada_em
+        timestamp encerrada_em
+    }
+    MENSAGEM {
+        bigint id PK
+        string sessao_id FK
+        string papel
+        jsonb conteudo
+        timestamp criada_em
+    }
+    AUDITORIA_MENSAGEM {
+        bigint id PK
+        bigint message_id FK
+        string sessao_id FK
+        string usuario_id
+        string perfil
+        string modelo
+        string provedor
+        jsonb ferramentas
+        jsonb fontes
+        jsonb regras_disparadas
+        string retorno_antecipado
+        boolean cache_hit
+        integer tokens_entrada
+        integer tokens_saida
+        integer latencia_ms
+        string trace_id
+        timestamp criada_em
+    }
 ```
+
+Cada resposta do assistente é uma linha em `auditoria_mensagens`, ligada à mensagem
+correspondente por `message_id`; mensagens do usuário não recebem auditoria. Uma sessão
+contém várias mensagens, e as auditorias se associam à sessão por meio da mensagem.
 
 **Chaves e joins — o que funciona e o que não funciona:**
 
