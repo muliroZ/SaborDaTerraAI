@@ -6,7 +6,8 @@ from datetime import date
 import pytest
 
 from sabor.db import conectar_readonly
-from sabor.tools.pedidos import Comprador, Entrega, Item, Pedido, _validar_dia_e_data
+from sabor.tools.catalogo import Catalogo
+from sabor.tools.pedidos import Comprador, Entrega, Item, Pedido, normalizar_pedido
 from sabor.tools.regras import classificar_pedido
 
 # Matriz oficial das 15 mensagens conforme docs/pedidos.md
@@ -220,7 +221,7 @@ def test_matriz_15_pedidos_sinalizacoes_e_urgencia(
             itens=[i.model_copy(deep=True) for i in itens],
         )
 
-        _validar_dia_e_data(pedido, mensagem_original, recebido_em.date())
+        normalizar_pedido(pedido, Catalogo.carregar(conn), recebido_em.date())
         classificar_pedido(
             pedido,
             conn=conn,
