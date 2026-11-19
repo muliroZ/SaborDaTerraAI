@@ -30,6 +30,17 @@ uv run sabor                      # abre http://localhost:8501 (equivale a `stre
 
 Escolha um usuário simulado na barra lateral (equipe da cooperativa ou produtor `P001`…`P018`) e converse pelo chat. A conversa fica no banco: recarregar a página retoma a sessão, e "Nova sessão" oferece o relatório da conversa anterior.
 
+### Cache de respostas estáticas
+
+Perguntas autocontidas da equipe (ex.: "Como armazenar queijo coalho?") ficam na tabela `UNLOGGED` `cache_respostas` e, repetidas em outra sessão, voltam sem chamar o LLM (selo "Resposta do cache", mesmas fontes). Respostas com dados pessoais, rascunhos, relatórios, bloqueios do guardrail ou do perfil produtor não entram no cache. A chave inclui a versão do dataset, então uma nova carga de dados invalida o cache sozinha.
+
+```bash
+uv run python scripts/atualizar_versao_dataset.py  # publica a versão do dataset (ETL e ingestão já fazem isso)
+uv run python scripts/limpar_cache.py              # esvazia o cache (--expirados: só as vencidas)
+```
+
+O TTL é `CACHE_TTL_S` no `.env` (padrão 24 h; `0` desliga o cache). Detalhes em [docs/dev/agente_e_fallback.md](docs/dev/agente_e_fallback.md).
+
 ## Triagem em lote da caixa de entrada
 
 ```bash

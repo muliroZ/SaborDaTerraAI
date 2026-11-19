@@ -112,10 +112,13 @@ def test_cache_hit_retorna_imediato_sem_marcar_como_bloqueio():
     turno = processar_turno(
         sessao_id="sessao-cache",
         mensagem="Qual o preço da macaxeira?",
+        agente=_criar_agente_teste(),
+        deps=AgentDeps(conn=MagicMock(), dataset_version="sha256:teste"),
         cache_repo=FakeCacheRepo(),
     )
 
     assert turno.bloqueado_guardrail is False
+    assert turno.cache_hit is True
     assert turno.retorno_antecipado is not None
     assert turno.retorno_antecipado.motivo == "CACHE_HIT"
     assert turno.texto == "O quilo da macaxeira custa R$ 4,50."

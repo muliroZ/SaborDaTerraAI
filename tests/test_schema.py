@@ -39,7 +39,7 @@ def test_dimensao_do_embedding_igual_ao_schema():
 
 
 def test_todas_as_tabelas_do_schema_estao_listadas():
-    criadas = re.findall(r'CREATE TABLE IF NOT EXISTS (\w+)', schema_sql())
+    criadas = re.findall(r'CREATE (?:UNLOGGED )?TABLE IF NOT EXISTS (\w+)', schema_sql())
     assert sorted(criadas) == sorted(TABELAS)
 
 
