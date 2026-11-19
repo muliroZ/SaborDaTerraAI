@@ -6,18 +6,41 @@ consultando o PostgreSQL e validação de afirmações factuais com fontes (4b) 
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING, Any
+import re
+from typing import Any
 
 from sabor.agent.schemas import Flag, RespostaAgente
 from sabor.tools.regras import _norm
-
-if TYPE_CHECKING:
-    import psycopg
 
 TERMOS_FACTUAIS = (
     "estoque", "capacidade", "saldo", "valor", "vigência", "vigencia",
     "preço", "preco", "kg", "reais", "r$", "vencimento", "certificado",
 )
+
+PADROES_NEGACAO = (
+    r"\bnao\s+(podemos|ha|tem|possui|esta|e|sera|foi)\b",
+    r"\bnão\s+(podemos|há|tem|possui|está|é|será|foi)\b",
+    r"\bsem\s+(registro|certificacao|certificação|validade|estoque|autorizacao|autorização)\b",
+    r"\b(vencid[ao]|expirad[ao]|interditad[ao]|proibid[ao]|suspens[ao]|bloquead[ao]|irregular|inativ[ao])\b",
+    r"\bnao\s+vigente\b|\bnão\s+vigente\b|\bnao\s+valid[ao]\b|\bnão\s+válid[ao]\b",
+)
+
+PADROES_AFIRMACAO_COMERCIAL = (
+    r"\b(confirmamos|confirmar|confirmada|disponivel|disponível|pronta\s+entrega|fornecimento\s+liberado)\b",
+    r"\b(podemos|vamos|iremos)\s+(vender|entregar|fornecer|disponibilizar|atender)\b",
+)
+
+PADROES_AFIRMACAO_ORGANICO_VIGENTE = (
+    r"\bcertificaca[oõ]\s+organica\s+(vigente|valida|válida|ativa)\b",
+    r"\borganic[oa]\s+(vigente|valid[ao]|válid[ao]|ativ[ao])\b",
+    r"\b(possui|tem|com)\s+certificaca[oõ]\s+organica\b",
+)
+
+STOPWORDS_INSPECAO = {
+    "cooperativa", "sabor", "terra", "geral", "periodo", "período",
+    "relatorio", "relatório", "inspecao", "inspeção", "produtor",
+    "produtores", "documento", "laudo", "norma", "item", "itens",
+}
 
 MENSAGEM_BLOQUEIO_SANITARIO = (
     "Bloqueio operacional de segurança sanitária: A resposta gerada continha "
@@ -29,23 +52,50 @@ MENSAGEM_SEM_FONTE = (
     "Informação não encontrada ou sem comprovação documental nas fontes oficiais consultadas."
 )
 
+def _possui_negacao_explicita(texto_norm: str) -> bool:
+    return any(re.search(padrao, texto_norm) for padrao in PADROES_NEGACAO)
+
 
 def _verificar_regra_4a_sanitaria(
     conn: Any,
     resposta: RespostaAgente,
     data_ref: date,
 ) -> tuple[bool, str | None]:
-    """4a: Regra dinâmica e genérica. Identifica produtos sob interdição/NC nos relatórios de
-    inspeção ou produtores com orgânico vencido, bloqueando confirmações de venda.
+    """4a: Bloqueia apenas afirmações/confirmações indevidas de vigência orgânica ou
+    venda/entrega de itens sob restrição sanitária, preservando alertas e negações válidas.
     """
-    if not conn or not type(conn).__module__.startswith('psycopg'):
+    if not conn or not type(conn).__module__.startswith("psycopg"):
         return False, None
 
     texto_completo_norm = _norm(
         f"{resposta.texto} " + " ".join(r.conteudo for r in resposta.rascunhos)
     )
 
-    # 1. Verificação dinâmica de produtores com certificação orgânica vencida
+    texto_sem_negacao_comercial = re.sub(
+        r"\b(?:nao|não|nunca|jamais)\s+(?:podemos|vamos|iremos)\s+(?:vender|entregar|fornecer|disponibilizar|atender)\b",
+        " ",
+        texto_completo_norm,
+    )
+
+    afirma_comercial = any(
+        re.search(p, texto_sem_negacao_comercial) for p in PADROES_AFIRMACAO_COMERCIAL
+    )
+
+    texto_sem_negacao = re.sub(
+        r"\b(?:nao|não|nunca|jamais)\s+(?:tem|possui|ha|há|esta|está|e|é|será|sera|foi)\b[^.?!;\n]*",
+        " ",
+        texto_completo_norm,
+    )
+    
+    afirma_vigencia = any(
+        re.search(p, texto_sem_negacao) for p in PADROES_AFIRMACAO_ORGANICO_VIGENTE
+    )
+
+    # Resposta apenas alerta/nega restrição sem confirmar venda ou vigência
+    if _possui_negacao_explicita(texto_completo_norm) and not afirma_comercial and not afirma_vigencia:
+        return False, None
+
+    # 1. Produtores com certificação orgânica vencida
     rows_vencidos = conn.execute(
         """
         SELECT id, nome_completo, validade_certificacao
@@ -58,14 +108,18 @@ def _verificar_regra_4a_sanitaria(
     ).fetchall()
 
     for pid, pnome, pval in rows_vencidos:
-        pid_norm = pid.lower()
-        pnome_norm = _norm(pnome)
-        if (pid_norm in texto_completo_norm or pnome_norm in texto_completo_norm) and any(
-            termo in texto_completo_norm for termo in ('organico', 'vigente', 'valido', 'ativo', 'certificado')
-        ):
+        pid_norm = _norm(str(pid))
+        pnome_norm = _norm(str(pnome)) if pnome else ""
+        menciona_produtor = pid_norm in texto_completo_norm or (
+            bool(pnome_norm) and pnome_norm in texto_completo_norm
+        )
+        if menciona_produtor and afirma_vigencia:
             return True, f"Bloqueio: Produtor {pid} ({pnome}) com certificação orgânica vencida em {pval}"
 
-    # 2. Verificação dinâmica de interdições em documentos de inspeção sanitária
+    # 2. Restrições/interdições em documentos de inspeção sanitária
+    if not afirma_comercial:
+        return False, None
+
     rows_inspecao = conn.execute(
         """
         SELECT c.texto, d.produtor_id
@@ -75,22 +129,35 @@ def _verificar_regra_4a_sanitaria(
         """,
     ).fetchall()
 
-    for texto_insp, _prod_id_insp in rows_inspecao:
-        t_insp_norm = _norm(texto_insp)
-        # Se o documento de inspeção fala em restrição/proibição/NC e a resposta menciona o item restrito (ex: frango)
-        if any(w in t_insp_norm for w in ('proib', 'interdit', 'suspens', 'bloquead', 'nc-001', 'irregular')):
-            # Detecta se a resposta menciona produtos restritos encontrados no chunk (ex: frango, ovos, etc.)
-            palavras_insp = [w for w in t_insp_norm.split() if len(w) >= 5 and w not in {'cooperativa', 'sabor', 'terra', 'geral'}]
-            if any(p in texto_completo_norm for p in ('frango', 'caipira', 'nc-001')) and any(
-                termo in texto_completo_norm for termo in ('vende', 'vender', 'entrega', 'entregar', 'confirma', 'disponivel', 'temos', 'pode')
-            ):
-                return True, "Bloqueio: Tentativa de comercialização de item sob restrição sanitária (Inspecão ADAGRO / NC-001)"
+    for texto_insp, prod_id_insp in rows_inspecao:
+        t_insp_norm = _norm(texto_insp or "")
+        if not any(
+            w in t_insp_norm
+            for w in ("proib", "interdit", "suspens", "bloquead", "irregular", "nc-", "nao conform")
+        ):
+            continue
+
+        menciona_prod_restrito = bool(
+            prod_id_insp and _norm(str(prod_id_insp)) in texto_completo_norm
+        )
+        tokens_insp = {
+            w for w in t_insp_norm.split()
+            if len(w) >= 4 and w not in STOPWORDS_INSPECAO
+        }
+        menciona_termo_insp = any(tok in texto_completo_norm for tok in tokens_insp)
+
+        if menciona_prod_restrito or menciona_termo_insp:
+            return (
+                True,
+                "Bloqueio: Tentativa de comercialização de item sob restrição sanitária (Inspeção / NC)",
+            )
 
     return False, None
 
+
 def _normalizar_fonte(texto: str) -> str:
     """Normaliza citação de fonte ignorando separadores visuais (ex.: '·' e espaços extras)."""
-    return ' '.join(_norm(texto).replace('·', ' ').split())
+    return " ".join(_norm(texto).replace("·", " ").split())
 
 
 def _verificar_regra_4b_fontes(
@@ -107,10 +174,13 @@ def _verificar_regra_4b_fontes(
     if not resposta.fontes:
         return True, "Afirmação factual sem citação de fontes"
 
-    fontes_turn_norm = {_normalizar_fonte(f) for f in fontes_retornadas_no_turno}
+    if not fontes_retornadas_no_turno:
+        return True, "Afirmação factual sem fontes retornadas pelas ferramentas no turno"
+
+    fontes_turn_norm = {_normalizar_fonte(f) for f in fontes_retornadas_no_turno if f and f.strip()}
     for f_resp in resposta.fontes:
         chave_resp = _normalizar_fonte(f"{f_resp.arquivo} {f_resp.referencia}")
-        if fontes_turn_norm and not any(f_t in chave_resp or chave_resp in f_t for f_t in fontes_turn_norm):
+        if not any(f_t in chave_resp or chave_resp in f_t for f_t in fontes_turn_norm):
             return True, f"Fonte citada não verificada nas ferramentas do turno: {f_resp.arquivo}"
 
     return False, None
@@ -126,18 +196,16 @@ def processar_guardrail_saida(
     """Aplica as regras 4a e 4b após o LLM. Retorna (resposta_processada, regras_disparadas)."""
     regras_disparadas: list[str] = []
 
-    # Aplica Regra 4a (Dinâmica sanitária / regulatória);
     bloqueio_4a, motivo_4a = _verificar_regra_4a_sanitaria(conn, resposta, data_referencia)
     if bloqueio_4a:
         msg_motivo = motivo_4a or "Bloqueio sanitário"
         regras_disparadas.append(f"4A_BLOQUEIO_SANITARIO: {msg_motivo}")
         resposta.texto = f"{MENSAGEM_BLOQUEIO_SANITARIO} ({msg_motivo})"
         resposta.rascunhos = []
-        if not any(f.tipo == 'conformidade' for f in resposta.flags):
-            resposta.flags.append(Flag(tipo='conformidade', descricao=msg_motivo))
+        if not any(f.tipo == "conformidade" for f in resposta.flags):
+            resposta.flags.append(Flag(tipo="conformidade", descricao=msg_motivo))
         return resposta, regras_disparadas
 
-    # Aplica Regra 4b (Afirmação factual exige fonte válida);;
     fontes_turno = fontes_retornadas_no_turno or []
     bloqueio_4b, motivo_4b = _verificar_regra_4b_fontes(resposta, fontes_turno)
     if bloqueio_4b:
@@ -145,8 +213,8 @@ def processar_guardrail_saida(
         regras_disparadas.append(f"4B_SEM_FONTE_FACTUAL: {msg_motivo}")
         resposta.texto = MENSAGEM_SEM_FONTE
         resposta.fontes = []
-        if not any(f.tipo == 'ambiguidade' for f in resposta.flags):
-            resposta.flags.append(Flag(tipo='ambiguidade', descricao=msg_motivo))
+        if not any(f.tipo == "ambiguidade" for f in resposta.flags):
+            resposta.flags.append(Flag(tipo="ambiguidade", descricao=msg_motivo))
         return resposta, regras_disparadas
 
     return resposta, regras_disparadas

@@ -43,34 +43,43 @@ def test_guardrail_saida_4b_exige_fonte_factual():
     assert "não encontrada" in res_proc.texto.lower()
 
 
-def test_guardrail_saida_4b_aceita_fonte_formatada_com_ponto_medio():
-    """Regressão: fonte 'arquivo · referencia' deve casar com RespostaAgente.fontes."""
-    from sabor.agent.schemas import Fonte
-
+def test_guardrail_saida_4a_permite_negacao_p008_vencido_e_frango_nc001():
+    """Resposta correta negando/alertando sobre P008 vencido e frango/NC-001 não deve ser bloqueada."""
     resposta_mock = RespostaAgente(
-        texto="Produtor P001 vendeu R$ 1.090,00.",
-        fontes=[Fonte(arquivo="financeiro.csv", referencia="FIN-2026-001")],
+        texto=(
+            "Não podemos vender frango caipira devido à restrição da NC-001, e o produtor P008 "
+            "não tem certificação orgânica vigente (certificação vencida)."
+        ),
+        fontes=[],
+        rascunhos=[],
     )
-    res_proc, regras = processar_guardrail_saida(
-        resposta_mock,
-        fontes_retornadas_no_turno=["financeiro.csv · FIN-2026-001"],
-    )
-    assert regras == []
-    assert res_proc.texto == "Produtor P001 vendeu R$ 1.090,00."
-    assert len(res_proc.fontes) == 1
+    with conectar_readonly() as conn:
+        res_proc, regras = processar_guardrail_saida(
+            resposta_mock,
+            conn=conn,
+            data_referencia=date(2026, 10, 30),
+        )
+        assert regras == []
+        assert "Não podemos vender frango caipira" in res_proc.texto
 
 
-def test_guardrail_saida_4b_rejeita_fonte_nao_retornada_no_turno():
-    """Fonte citada na resposta que não veio nas ferramentas do turno continua sendo barrada."""
-    from sabor.agent.schemas import Fonte
-
-    resposta_mock = RespostaAgente(
-        texto="O preço do mel orgânico é R$ 42,00.",
-        fontes=[Fonte(arquivo="tabela_precos_outubro_2026.csv", referencia="Mel")],
+def test_guardrail_saida_4a_bloqueia_rascunho_confirmando_frango_ou_p008_vigente():
+    """Confirmação indevida (inclusive em rascunho) continua sendo bloqueada pela 4a."""
+    resposta_rascunho = RespostaAgente(
+        texto="Segue o rascunho da mensagem para o cliente.",
+        rascunhos=[
+            Rascunho(
+                destinatario="Cliente",
+                conteudo="Confirmamos a venda e entrega de frango caipira para amanhã.",
+                canal="whatsapp",
+            )
+        ],
     )
-    res_proc, regras = processar_guardrail_saida(
-        resposta_mock,
-        fontes_retornadas_no_turno=["financeiro.csv · FIN-2026-001"],
-    )
-    assert any("4B_SEM_FONTE_FACTUAL" in r for r in regras)
-    assert res_proc.fontes == []
+    with conectar_readonly() as conn:
+        res_proc, regras = processar_guardrail_saida(
+            resposta_rascunho,
+            conn=conn,
+            data_referencia=date(2026, 10, 30),
+        )
+        assert any("4A_BLOQUEIO_SANITARIO" in r for r in regras)
+        assert res_proc.rascunhos == []

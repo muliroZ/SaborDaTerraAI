@@ -3,8 +3,9 @@
 import time
 from unittest.mock import MagicMock
 
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from sabor.agent.deps import AgentDeps
@@ -35,7 +36,12 @@ def test_timeout_padrao_turno_e_20_segundos():
 
 
 def test_processar_turno_fluxo_completo_etapas_1_a_5():
+    from pydantic_ai.messages import ToolReturnPart
+
     etapas_executadas: list[str] = []
+
+    def fn_tool_fin(ctx: RunContext[AgentDeps]) -> dict:
+        return {'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-001'}
 
     def fn_memoria(sessao_id: str):
         etapas_executadas.append(f'1_memoria:{sessao_id}')
@@ -47,7 +53,14 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
 
     def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
         etapas_executadas.append('3_pydantic_ai')
-        return ModelResponse(
+        ja_chamou_fin = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou_fin:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='fn_tool_fin', args={}, tool_call_id='call_fin')]
+            )
+            return ModelResponse(
             parts=[
                 ToolCallPart(
                     tool_name='final_result',
@@ -73,7 +86,10 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
     def fn_salvar_memoria(sessao_id: str, msg: str, turno: RespostaTurno) -> None:
         etapas_executadas.append(f'5b_salvar_memoria:{sessao_id}')
 
-    agente = criar_agente([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)])
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[fn_tool_fin],
+    )
     deps = AgentDeps(
         conn=MagicMock(),
         usuario='Dona Lúcia',
@@ -95,6 +111,7 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
     assert etapas_executadas == [
         '1_memoria:sess-100',
         '2_guardrail_entrada',
+        '3_pydantic_ai',
         '3_pydantic_ai',
         f'5a_auditoria:{MODELO_PRIMARIO}',
         '5b_salvar_memoria:sess-100',
@@ -379,10 +396,14 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
     para o guardrail de saída consultar o banco, e é fechada logo depois."""
     import psycopg
     import pytest
+    from pydantic_ai.messages import ToolReturnPart
 
     import sabor.agent.runner as runner
     from sabor.db import conectar_readonly
 
+    def fn_tool_preco(ctx: RunContext[AgentDeps]) -> dict:
+        return {'arquivo': 'tabela_precos_outubro_2026.csv', 'referencia': 'Queijo'}
+    
     try:
         conectar_readonly(tentativas=1).close()
     except psycopg.OperationalError:
@@ -398,7 +419,14 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
     monkeypatch.setattr(runner, 'conectar_readonly', _abrir)
 
     def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
-        return ModelResponse(
+        ja_chamou_preco = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou_preco:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='fn_tool_preco', args={}, tool_call_id='call_preco')]
+            )
+            return ModelResponse(
             parts=[
                 ToolCallPart(
                     tool_name='final_result',
@@ -415,7 +443,10 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
     turno = processar_turno(
         'sess-pg-guardrail',
         'Qual o preço do queijo coalho?',
-        agente=criar_agente([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)], tools=[]),
+        agente=criar_agente(
+            [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+            tools=[fn_tool_preco],
+        ),
         guardrail_entrada=lambda _m: None,
     )
 
@@ -709,3 +740,54 @@ def test_relatorio_continua_anexado_quando_o_guardrail_de_saida_reescreve_o_text
     assert turno.texto != 'Relatório gerado: R$ 8.690,00 vencidos.'  # 4B reescreveu o texto
     [relatorio] = turno.relatorios
     assert '[CPF_MASCARADO]' in relatorio.markdown
+
+def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
+    """Regra 4b (#34): fonte citada pelo modelo sem respaldo nas tools do turno é bloqueada."""
+    from pydantic_ai import RunContext
+    from pydantic_ai.messages import ToolReturnPart
+
+    def consultar_financeiro_fake(ctx: RunContext[AgentDeps]) -> dict:
+        return {
+            'arquivo': 'financeiro.csv',
+            'referencia': 'FIN-2026-001',
+            'valor': 'R$ 1.090,00',
+        }
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou_tool = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou_tool:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='consultar_financeiro_fake', args={})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'O preço vigente do mel é R$ 45,00 por kg.',
+                        'fontes': [
+                            {'arquivo': 'fonte_inventada.csv', 'referencia': 'FAKE-001'}
+                        ],
+                    },
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[consultar_financeiro_fake],
+    )
+    turno = processar_turno(
+        'sess-4b-fonte-inventada',
+        'Qual o preço do mel por kg?',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock()),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.bloqueado_guardrail is True
+    assert any('4B_SEM_FONTE_FACTUAL' in r for r in turno.regras_disparadas)
+    assert turno.fontes == []
+    assert 'não encontrada' in turno.texto.lower()
