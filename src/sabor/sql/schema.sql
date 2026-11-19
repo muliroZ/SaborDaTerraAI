@@ -371,6 +371,13 @@ CREATE TABLE IF NOT EXISTS auditoria_mensagens (
     criado_em           timestamptz NOT NULL DEFAULT now()
 );
 
+-- Versão do dataset publicada ao fim do ETL/ingestão; lida pelo cache da Etapa 2.
+CREATE TABLE IF NOT EXISTS dataset_metadata (
+    chave          text PRIMARY KEY,
+    versao         text NOT NULL,
+    atualizada_em  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
 
@@ -402,6 +409,25 @@ CREATE TABLE IF NOT EXISTS mensagens (
     conteudo   jsonb NOT NULL,
     criada_em  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Auditoria #35 mantém 0..N registros por sessão. ON DELETE SET NULL preserva a
+-- auditoria mesmo que uma sessão seja removida; o tipo text segue o contrato vigente.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'auditoria_mensagens_sessao_id_fkey'
+          AND conrelid = 'auditoria_mensagens'::regclass
+    ) THEN
+        ALTER TABLE auditoria_mensagens
+            ADD CONSTRAINT auditoria_mensagens_sessao_id_fkey
+            FOREIGN KEY (sessao_id) REFERENCES sessoes (id) ON DELETE SET NULL NOT VALID;
+    END IF;
+END
+$$;
+
+COMMENT ON COLUMN auditoria_mensagens.sessao_id IS
+    'Sessão associada (0..N auditorias por sessão); NULL quando sem sessão ou removida.';
 
 COMMENT ON COLUMN mensagens.conteudo IS
     'Usuário: {"texto": ...}. Assistente: RespostaTurno serializado (texto, fontes, flags, '

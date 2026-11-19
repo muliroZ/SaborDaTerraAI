@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from sabor.db import conectar, EMBEDDING_DIM
+from sabor.agent.deps import atualizar_versao_dataset
 import time
 from google.genai import errors
 
@@ -234,6 +235,9 @@ def main():
 
             print(f"[OK] {caminho_relativo} ({t_doc}, {len(chunks)} chunks)")
 
+    with conn.transaction():
+        versao = atualizar_versao_dataset(conn)
+    print(f"Versão do dataset atualizada: {versao}")
     testar_busca(conn, "certificação orgânica mel")
     print("\nIngestão concluída com sucesso.")
 

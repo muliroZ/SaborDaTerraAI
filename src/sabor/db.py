@@ -34,6 +34,7 @@ TABELAS = (
     'produtos',
     'produtores',
     "auditoria_mensagens",
+    'dataset_metadata',
 )
 VIEWS = ('chunks_busca',)
 

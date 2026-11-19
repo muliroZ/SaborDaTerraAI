@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 import inspect
+import json
 import logging
 import re
 import threading
@@ -24,7 +25,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from sabor import tools as modulo_tools
-from sabor.agent.deps import AgentDeps, obter_data_referencia
+from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
 from sabor.agent.fallback import (
     construir_capability_fallback,
     extrair_metadados_resposta,
@@ -308,6 +309,25 @@ def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
     )
 
 
+def _mascarar_historico_json(serializado: str, mascarar: Callable[[str], str]) -> str:
+    """Mascara strings do histórico sem tocar em IDs que pareiam chamadas/retornos de tools."""
+    dados = json.loads(serializado)
+    chaves_identidade = {'id', 'tool_call_id', 'conversation_id', 'message_id', 'metadata'}
+
+    def percorrer(valor: Any, chave_pai: str | None = None) -> Any:
+        if chave_pai in chaves_identidade:
+            return valor
+        if isinstance(valor, dict):
+            return {k: percorrer(v, k) for k, v in valor.items()}
+        if isinstance(valor, list):
+            return [percorrer(v, chave_pai) for v in valor]
+        if isinstance(valor, str):
+            return mascarar(valor)
+        return valor
+
+    return json.dumps(percorrer(dados), ensure_ascii=False, separators=(',', ':'))
+
+
 def _coletar_fontes_valor(
     valor: Any, destino: list[str], *, aceitar_str: bool = False
 ) -> None:
@@ -365,7 +385,7 @@ def processar_turno(
     guardrail_entrada: Callable[[str], RetornoAntecipado | str | None] | None = None,  # Etapa 2
     pos_processar: Callable[[RespostaAgente], RespostaAgente] | None = None,  # Etapa 4
     registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
-    salvar_memoria: Callable[[str, str, RespostaTurno], None] | None = None,  # Etapa 5b (#31)
+    salvar_memoria: Callable[..., None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
     """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados."""
     inicio = time.perf_counter()
@@ -376,6 +396,8 @@ def processar_turno(
     historico: list[ModelMessage] = (
         list(carregar_memoria(sessao_id)) if carregar_memoria is not None else []
     )
+    conn_propria = None
+    dataset_ver = deps.dataset_version if deps is not None else None
 
     # -----------------------------------------------------------------------
     # Etapa 2: Guardrail de entrada (retorno antecipado sem chamada LLM)
@@ -383,64 +405,77 @@ def processar_turno(
     mensagem_limpa = mensagem.strip()
     retorno_antecipado: RetornoAntecipado | None = None
 
-    if not mensagem_limpa:
-        retorno_antecipado = RetornoAntecipado(
-            motivo='ENTRADA_VAZIA',
-            mensagem=MENSAGEM_ENTRADA_VAZIA,
-        )
-    elif guardrail_entrada is not None:
-        resultado_hook = guardrail_entrada(mensagem_limpa)
-        if isinstance(resultado_hook, RetornoAntecipado):
-            retorno_antecipado = resultado_hook
-        elif isinstance(resultado_hook, str):
-            retorno_antecipado = RetornoAntecipado(
-                motivo='FORA_DE_ESCOPO',
-                mensagem=resultado_hook,
-            )
-    else:
-        dataset_ver = deps.dataset_version if deps is not None else 'v1'
-        contagem_sessao = (
-            requisicoes_na_sessao
-            if requisicoes_na_sessao is not None
-            else _contar_turnos_historico(historico)
-        )
-        retorno_antecipado = executar_guardrail_entrada(
-            mensagem=mensagem_limpa,
-            dataset_version=dataset_ver,
-            requisicoes_na_sessao=contagem_sessao,
-            cache_repo=cache_repo,
-        )
-
-    if retorno_antecipado is not None:
-        latencia_ms = int((time.perf_counter() - inicio) * 1000)
-        eh_cache_hit = retorno_antecipado.motivo == 'CACHE_HIT'
-        turno_antecipado = RespostaTurno(
-            sessao_id=sessao_id,
-            usuario=usuario,
-            texto=retorno_antecipado.mensagem,
-            fontes=list(retorno_antecipado.fontes),
-            bloqueado_guardrail=not eh_cache_hit,
-            retorno_antecipado=retorno_antecipado,
-            latencia_ms=latencia_ms,
-        )
-        if registrar_auditoria is not None:
-            registrar_auditoria(turno_antecipado)
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
-        return turno_antecipado
-
-    # -----------------------------------------------------------------------
-    # Etapa 3: Execução do Agente PydanticAI + UsageLimits (2c) + Fallback (#37)
-    # -----------------------------------------------------------------------
-    agente_exec = agente if agente is not None else criar_agente()
-    prazo_turno_s = timeout_turno_s if timeout_turno_s is not None else obter_timeout_turno()
-    limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
-    # Conexão aberta pelo turno: em erro/timeout, `_executar_com_prazo` agenda o fechamento;
-    # no caminho normal, fica aberta até o fim da Etapa 4 (guardrail de saída) e fecha no finally.
-    # Com `deps` do chamador, a conexão é dele.
-    conn_propria = conectar_readonly() if deps is None else None
-
     try:
+        if not mensagem_limpa:
+            retorno_antecipado = RetornoAntecipado(
+                motivo='ENTRADA_VAZIA',
+                mensagem=MENSAGEM_ENTRADA_VAZIA,
+            )
+        elif guardrail_entrada is not None:
+            resultado_hook = guardrail_entrada(mensagem_limpa)
+            if isinstance(resultado_hook, RetornoAntecipado):
+                retorno_antecipado = resultado_hook
+            elif isinstance(resultado_hook, str):
+                retorno_antecipado = RetornoAntecipado(
+                    motivo='FORA_DE_ESCOPO',
+                    mensagem=resultado_hook,
+                )
+        else:
+            # A Etapa 2 usa a versão persistida pelo ETL/ingestão (1 linha de metadados),
+            # reutilizada na Etapa 3 sem abrir conexão para entradas vazias/hooks customizados.
+            if not dataset_ver:
+                conn_fingerprint = deps.conn if deps is not None else conectar_readonly()
+                if deps is None:
+                    conn_propria = conn_fingerprint
+                dataset_ver = obter_versao_dataset(conn_fingerprint)
+            dataset_ver = dataset_ver or 'sha256-unavailable'
+            contagem_sessao = (
+                requisicoes_na_sessao
+                if requisicoes_na_sessao is not None
+                else _contar_turnos_historico(historico)
+            )
+            retorno_antecipado = executar_guardrail_entrada(
+                mensagem=mensagem_limpa,
+                dataset_version=dataset_ver,
+                requisicoes_na_sessao=contagem_sessao,
+                cache_repo=cache_repo,
+            )
+
+        if retorno_antecipado is not None:
+            if conn_propria is not None:
+                _fechar_quando_livre(conn_propria)
+                conn_propria = None
+            latencia_ms = int((time.perf_counter() - inicio) * 1000)
+            eh_cache_hit = retorno_antecipado.motivo == 'CACHE_HIT'
+            turno_antecipado = RespostaTurno(
+                sessao_id=sessao_id,
+                usuario=usuario,
+                texto=retorno_antecipado.mensagem,
+                fontes=list(retorno_antecipado.fontes),
+                bloqueado_guardrail=not eh_cache_hit,
+                retorno_antecipado=retorno_antecipado,
+                latencia_ms=latencia_ms,
+            )
+            if registrar_auditoria is not None:
+                registrar_auditoria(turno_antecipado)
+            if salvar_memoria is not None:
+                salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
+            return turno_antecipado
+
+        # -----------------------------------------------------------------------
+        # Etapa 3: Execução do Agente PydanticAI + UsageLimits (2c) + Fallback (#37)
+        # -----------------------------------------------------------------------
+        agente_exec = agente if agente is not None else criar_agente()
+        prazo_turno_s = timeout_turno_s if timeout_turno_s is not None else obter_timeout_turno()
+        limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
+        # Conexão aberta pelo turno: em erro/timeout, `_executar_com_prazo` agenda o fechamento;
+        # no caminho normal, segue aberta até a Etapa 4 (guardrail de saída) e fecha no finally.
+        # Com `deps` do chamador, a conexão é dele.
+        if conn_propria is None and deps is None:
+            conn_propria = conectar_readonly()
+        if not dataset_ver:
+            dataset_ver = obter_versao_dataset(conn_propria if deps is None else deps.conn)
+
         deps_exec = (
             deps
             if deps is not None
@@ -448,9 +483,12 @@ def processar_turno(
                 conn=conn_propria,
                 data_referencia=obter_data_referencia(),
                 usuario=usuario,
+                dataset_version=dataset_ver,
                 mascarador=Mascarador(),
             )
         )
+        if deps is not None and not deps_exec.dataset_version:
+            deps_exec.dataset_version = dataset_ver
         if isinstance(getattr(deps_exec, 'relatorios', None), list):
             deps_exec.relatorios.clear()  # só anexa o que for gerado neste turno (#15)
         mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
@@ -478,7 +516,8 @@ def processar_turno(
     except UsageLimitExceeded as exc:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
         logger.warning(
-            'Orçamento do turno esgotado (sessao=%s, latencia_ms=%s): %s',
+            'Orçamento do turno esgotado desfecho=orcamento_esgotado '
+            'sessao=%s latencia_ms=%s motivo=%s',
             sessao_id,
             latencia_ms,
             exc,
@@ -561,8 +600,8 @@ def processar_turno(
     uso = getattr(resultado, 'usage', None)
     if uso is not None:
         logger.info(
-            'Turno concluído (sessao=%s, modelo=%s, chamadas=%s, tokens_in=%s, '
-            'tokens_out=%s, tokens_total=%s, latencia_ms=%s)',
+            'desfecho=sucesso sessao=%s modelo=%s chamadas=%s tokens_in=%s '
+            'tokens_out=%s tokens_total=%s latencia_ms=%s',
             sessao_id,
             modelo_efetivo,
             getattr(uso, 'requests', None),
@@ -580,7 +619,7 @@ def processar_turno(
         tentativas_fallback=tentativas,
         latencia_ms=latencia_ms,
     )
-
+    bloqueado_guardrail_saida = bool(regras_saida)
     if regras_saida:
         turno = turno.model_copy(
             update={
@@ -592,6 +631,26 @@ def processar_turno(
     if registrar_auditoria is not None:
         registrar_auditoria(turno)
     if salvar_memoria is not None:
-        salvar_memoria(sessao_id, mensagem_limpa, turno)
+        historico_json = None
+        if not bloqueado_guardrail_saida:
+            historico_json = resultado.new_messages_json()
+            if isinstance(historico_json, bytes):
+                historico_json = historico_json.decode('utf-8')
+            mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+            if callable(mascarar_fn):
+                historico_json = _mascarar_historico_json(historico_json, mascarar_fn)
+        try:
+            suporta_historico = (
+                'historico_modelo_json' in inspect.signature(salvar_memoria).parameters
+            )
+        except (TypeError, ValueError):
+            suporta_historico = False
+        if suporta_historico:
+            salvar_memoria(
+                sessao_id, mensagem_limpa, turno,
+                historico_modelo_json=historico_json,
+            )
+        else:
+            salvar_memoria(sessao_id, mensagem_limpa, turno)
 
     return turno

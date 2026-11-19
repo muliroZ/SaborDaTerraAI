@@ -4,6 +4,7 @@ import logging
 from unittest.mock import MagicMock
 
 from pydantic_ai.messages import (
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     ToolCallPart,
@@ -87,8 +88,8 @@ def _agente_multietapas():
 def test_consulta_de_cinco_chamadas_conclui_e_registra_consumo(caplog):
     salvos = []
 
-    def salvar(sid, msg, turno):
-        salvos.append((sid, msg, turno))
+    def salvar(sid, msg, turno, historico_modelo_json=None):
+        salvos.append(historico_modelo_json)
 
     with caplog.at_level(logging.INFO, logger='sabor.agent.runner'):
         turno = processar_turno(
@@ -101,7 +102,9 @@ def test_consulta_de_cinco_chamadas_conclui_e_registra_consumo(caplog):
     assert turno.texto == 'Consulta concluída.'
     assert not turno.bloqueado_guardrail and not turno.falha_segura
     assert len(salvos) == 1
-    assert 'Turno concluído' in caplog.text
+    historico = ModelMessagesTypeAdapter.validate_json(salvos[0])
+    assert sum(isinstance(p, ToolCallPart) for m in historico for p in m.parts) == 5
+    assert 'desfecho=sucesso' in caplog.text
     assert 'chamadas=5' in caplog.text
     assert 'tokens_total=20500' in caplog.text
     assert 'CONFIDENCIAL-TESTE' not in caplog.text

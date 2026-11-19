@@ -66,12 +66,14 @@ def obter_limites_configurados() -> dict[str, int]:
     def _parse_env(var_name: str, default_val: str) -> int:
         val = os.getenv(var_name)
         if not val or not val.strip():
-            val = default_val
+            return int(default_val)
         try:
             parsed = int(val.strip())
-            return parsed if parsed > 0 else int(default_val)
         except (ValueError, TypeError):
             return int(default_val)
+        if parsed <= 0:
+            return int(default_val)
+        return parsed
 
     return {
         "max_caracteres": _parse_env("GUARDRAIL_MAX_CHARS", "750"),

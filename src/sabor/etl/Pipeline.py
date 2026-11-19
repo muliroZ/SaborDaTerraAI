@@ -13,6 +13,8 @@ from sabor.etl.repo import EtlProdutoSinonimos
 from sabor.etl.repo import EtlSazonalidadeMensal
 
 from sabor.etl.repo import TruncateTables
+from sabor.agent.deps import atualizar_versao_dataset
+from sabor.db import conectar
 class Pipeline:
 
     def __init__(self, label: str):
@@ -55,6 +57,11 @@ class Pipeline:
         self.etl_produtor_produtos.exec()
         self.etl_financeiro.exec()
         self.etl_lotes.exec()
+
+        # Publica fingerprint somente depois que todas as etapas da carga terminam.
+        with conectar() as conn:
+            versao = atualizar_versao_dataset(conn)
+        self.info(f'{self.label}.run: versão do dataset atualizada ({versao}).')
 
         self.divider('-')
         self.info(f'{self.label}.run: ETL executada com sucesso!')

@@ -24,6 +24,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -61,6 +62,7 @@ class Mensagem:
     texto: str
     criada_em: datetime
     turno: RespostaTurno | None = None
+    historico_modelo_json: str | None = None
 
 
 def max_turnos_memoria() -> int:
@@ -159,7 +161,8 @@ def listar_sessoes_encerradas(
 
 
 def registrar_turno(
-    conn: psycopg.Connection, sessao_id: str, mensagem: str, turno: RespostaTurno
+    conn: psycopg.Connection, sessao_id: str, mensagem: str, turno: RespostaTurno,
+    historico_modelo_json: str | None = None,
 ) -> None:
     """Etapa 5b: grava a pergunta e a resposta do turno, inclusive retornos antecipados e
     falha segura, para o histórico exibido na interface ficar coerente."""
@@ -169,7 +172,15 @@ def registrar_turno(
                 'INSERT INTO mensagens (sessao_id, papel, conteudo) VALUES (%s, %s, %s)',
                 [
                     (sessao_id, 'usuario', Jsonb({'texto': mensagem})),
-                    (sessao_id, 'assistente', Jsonb(turno.model_dump(mode='json'))),
+                    (
+                        sessao_id,
+                        'assistente',
+                        Jsonb({
+                            **turno.model_dump(mode='json'),
+                            **({'historico_modelo_json': historico_modelo_json}
+                               if historico_modelo_json else {}),
+                        }),
+                    ),
                 ],
             )
 
@@ -178,7 +189,10 @@ def _mensagem(row: Sequence[Any]) -> Mensagem:
     id_, papel, conteudo, criada_em = row
     if papel == 'assistente':
         turno = RespostaTurno.model_validate(conteudo)
-        return Mensagem(id=id_, papel=papel, texto=turno.texto, criada_em=criada_em, turno=turno)
+        return Mensagem(
+            id=id_, papel=papel, texto=turno.texto, criada_em=criada_em, turno=turno,
+            historico_modelo_json=conteudo.get('historico_modelo_json'),
+        )
     return Mensagem(id=id_, papel=papel, texto=conteudo.get('texto', ''), criada_em=criada_em)
 
 
@@ -212,20 +226,50 @@ def montar_historico(
         return []
     mascarar = (mascarador or Mascarador()).mascarar
 
-    pares: list[tuple[str, str]] = []
-    pergunta: str | None = None
+    pares: list[tuple[Mensagem, Mensagem]] = []
+    pergunta: Mensagem | None = None
     for msg in mensagens:
         if msg.papel == 'usuario':
-            pergunta = msg.texto
+            pergunta = msg
         elif pergunta is not None and msg.turno is not None:
             if turno_entra_na_memoria(msg.turno):
-                pares.append((pergunta, msg.turno.texto))
+                pares.append((pergunta, msg))
             pergunta = None
 
     historico: list[ModelMessage] = []
-    for pergunta, resposta in pares[-max_turnos:]:
-        historico.append(ModelRequest(parts=[UserPromptPart(content=mascarar(pergunta))]))
-        historico.append(ModelResponse(parts=[TextPart(content=mascarar(resposta))]))
+    for usuario_msg, assistente_msg in pares[-max_turnos:]:
+        if assistente_msg.historico_modelo_json:
+            try:
+                historico.extend(
+                    ModelMessagesTypeAdapter.validate_json(assistente_msg.historico_modelo_json)
+                )
+                continue
+            except (ValueError, TypeError):
+                pass  # Registros inválidos/antigos usam o fallback textual abaixo.
+        historico.append(ModelRequest(parts=[UserPromptPart(content=mascarar(usuario_msg.texto))]))
+        historico.append(ModelResponse(parts=[TextPart(content=mascarar(assistente_msg.texto))]))
+
+    # Reserve metade do orçamento do turno para a mensagem atual, tools e resposta.
+    # Se o histórico completo crescer demais, descarte turnos antigos inteiros para
+    # preservar o pareamento de chamadas/retornos de tools.
+    try:
+        limite_turno = max(1, int(os.getenv('TURNO_TOKENS_LIMIT', '32000')))
+    except ValueError:
+        limite_turno = 32000
+    limite_historico_bytes = limite_turno * 2  # estimativa conservadora: ~4 bytes/token
+    while historico and len(ModelMessagesTypeAdapter.dump_json(historico)) > limite_historico_bytes:
+        proximo_turno = next(
+            (
+                i for i, msg in enumerate(historico[1:], start=1)
+                if isinstance(msg, ModelRequest)
+                and any(isinstance(part, UserPromptPart) for part in msg.parts)
+            ),
+            None,
+        )
+        if proximo_turno is None:
+            historico = []
+            break
+        historico = historico[proximo_turno:]
     return historico
 
 
