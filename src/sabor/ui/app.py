@@ -47,6 +47,26 @@ DATASET_VERSION = next(f.default for f in fields(AgentDeps) if f.name == 'datase
 NOME_ASSISTENTE = 'CajAI'
 ICONE_ASSISTENTE = ':material/eco:'
 
+CSS_PREVIA_RELATORIO = """\
+<style>
+[class*="st-key-relatorio-preview-"] div[data-testid="stMarkdownContainer"] {
+    max-width: 100%;
+    overflow-x: auto;
+}
+[class*="st-key-relatorio-preview-"] div[data-testid="stMarkdownContainer"] table {
+    width: max-content;
+    min-width: 900px;
+    table-layout: auto;
+}
+[class*="st-key-relatorio-preview-"] div[data-testid="stMarkdownContainer"] th,
+[class*="st-key-relatorio-preview-"] div[data-testid="stMarkdownContainer"] td {
+    min-width: 7rem;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+}
+</style>
+"""
+
 
 class TurnoEmAndamento(RuntimeError):
     """Já existe um turno rodando nesta sessão (outra aba ou clique repetido)."""
@@ -267,6 +287,13 @@ def render_rascunhos(turno: RespostaTurno) -> None:
         st.caption('Revise antes de enviar. Use o ícone de cópia no canto da caixa.')
 
 
+def render_previa_relatorio(markdown: str, chave: str) -> None:
+    """Mostra relatórios com rolagem horizontal para tabelas mais largas que o painel."""
+    st.markdown(CSS_PREVIA_RELATORIO, unsafe_allow_html=True)
+    with st.container(key=f'relatorio-preview-{chave}'):
+        st.markdown(markdown)
+
+
 def render_relatorios(turno: RespostaTurno, chave: str) -> None:
     """Relatórios sob demanda (#15): download do Markdown e pré-visualização."""
     for indice, relatorio in enumerate(turno.relatorios):
@@ -282,7 +309,7 @@ def render_relatorios(turno: RespostaTurno, chave: str) -> None:
                 key=f'relatorio-{chave}-{indice}',
             )
             with st.expander('Pré-visualizar relatório'):
-                st.markdown(relatorio.markdown)
+                render_previa_relatorio(relatorio.markdown, f'{chave}-{indice}')
 
 
 def render_resposta(turno: RespostaTurno, usuario_id: str, chave: str = 'atual') -> None:
@@ -329,7 +356,7 @@ def dialogo_nova_sessao(sessao_id: str, usuario_id: str) -> None:
         width='stretch',
     )
     with st.expander('Pré-visualizar relatório'):
-        st.markdown(markdown)
+        render_previa_relatorio(markdown, f'nova-sessao-{sessao_id}')
     if st.button('Encerrar e iniciar nova sessão', type='primary', width='stretch'):
         with conexao() as conn:
             sess.nova_sessao(conn, sessao_id, usuario_id)
@@ -348,7 +375,7 @@ def dialogo_relatorio(sessao_id: str) -> None:
         icon=':material/download:',
         on_click='ignore',
     )
-    st.markdown(markdown)
+    render_previa_relatorio(markdown, f'sessao-anterior-{sessao_id}')
 
 
 @st.dialog('Caixa de entrada', width='large')
