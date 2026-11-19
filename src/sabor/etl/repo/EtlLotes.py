@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import numpy as np
 from .Etl import Etl
@@ -49,11 +48,6 @@ class EtlLotes(Etl):
         self.df['produto_id'] = self.mapear_produto_id(self.df['produto'])
 
         # Inferir vínculo transacao_id com a tabela financeiro
-        url = (
-            f"postgresql+psycopg://{os.getenv('DATABASE_USER', 'sabor')}:"
-            f"{os.getenv('DATABASE_PASSWORD')}@{os.getenv('DATABASE_HOST', 'localhost')}:"
-            f"{os.getenv('DATABASE_PORT', 5432)}/{os.getenv('DATABASE_NAME', 'sabor')}"
-        )
         df_fin = pd.read_sql(
             """
             SELECT id_transacao AS transacao_id,
@@ -65,7 +59,7 @@ class EtlLotes(Etl):
             FROM financeiro
             WHERE tipo = 'venda'
             """,
-            url,
+            self.driver.engine,
         )
 
         # Padronizar chaves para garantir match exato no Pandas

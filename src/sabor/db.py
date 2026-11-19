@@ -41,13 +41,22 @@ VIEWS = ('chunks_busca',)
 
 
 def database_url() -> str:
-    """URL do banco: `DATABASE_URL` ou, se vazia, a do docker-compose local."""
+    """URL do banco: `DATABASE_URL` ou, se vazia, montada a partir de `DATABASE_HOST`,
+    `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD` e `DATABASE_NAME` (as mesmas
+    variáveis do ETL), com os padrões do docker-compose local.
+    """
     load_dotenv()
     if url := os.getenv('DATABASE_URL'):
         return url
+    usuario = quote(os.getenv('DATABASE_USER') or 'sabor', safe='')
     senha = quote(os.getenv('DATABASE_PASSWORD') or 'sabor', safe='')
+    host = os.getenv('DATABASE_HOST') or 'localhost'
     porta = os.getenv('DATABASE_PORT') or '5432'
-    return f'postgresql://sabor:{senha}@localhost:{porta}/sabor'
+    banco = quote(os.getenv('DATABASE_NAME') or 'sabor', safe='')
+    if host.startswith('/'):
+        # Socket Unix (ex.: /cloudsql/PROJETO:REGIAO:INSTANCIA no Cloud Run, #17).
+        return f'postgresql://{usuario}:{senha}@/{banco}?host={quote(host, safe="/:")}&port={porta}'
+    return f'postgresql://{usuario}:{senha}@{host}:{porta}/{banco}'
 
 
 def conectar(url: str | None = None, tentativas: int = 30, **kwargs) -> psycopg.Connection:

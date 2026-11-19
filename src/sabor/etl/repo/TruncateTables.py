@@ -1,5 +1,5 @@
-import os
 from dotenv import load_dotenv
+from sabor.db import database_url
 from sabor.etl.psql import PostgresDriver
 
 from pathlib import Path
@@ -11,13 +11,7 @@ load_dotenv()
 class TruncateTables:
 
     def __init__(self):
-        self.driver = PostgresDriver(
-            user    =os.getenv("DATABASE_USER", "sabor"),
-            password=os.getenv("DATABASE_PASSWORD"),
-            database=os.getenv("DATABASE_NAME", "sabor"),
-            host    =os.getenv("DATABASE_HOST", "localhost"),
-            port    =int(os.getenv("DATABASE_PORT", 5432))
-        )
+        self.driver = PostgresDriver.from_url(database_url())
 
     def info(self, message: str) -> None:
         print(message)
