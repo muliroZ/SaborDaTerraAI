@@ -58,6 +58,7 @@ MENSAGEM_ORCAMENTO_TURNO = (
     "permitido para um único turno. Por favor, reformule ou divida a pergunta."
 )
 
+REGEX_DIVISORES_EMAIL = re.compile(r"(?:^|\s)[=\-_*~]{3,}(?:\s|$)")
 
 def obter_limites_configurados() -> dict[str, int]:
     load_dotenv()
@@ -100,27 +101,26 @@ def _eh_gibberish(texto: str) -> bool:
     if len(texto_limpo) < 4:
         return False
 
-    # Remove espaços para avaliar densidade de letras/símbolos
-    sem_espacos = texto_limpo.replace(" ", "")
-    if len(sem_espacos) == 0:
+    # Ignora divisores estruturais legítimos antes de checar densidade/ruído de símbolos
+    texto_sem_divisores = REGEX_DIVISORES_EMAIL.sub(" ", texto_limpo).strip()
+    if not texto_sem_divisores:
         return True
 
-    # 1. Proporção excessiva de caracteres especiais não alfanuméricos consecutivos
-    if re.search(r'[^a-zA-Z0-9À-ÿ\s]{4,}', texto_limpo):
+    # 1. Proporção excessiva de caracteres especiais aleatórios consecutivos
+    if re.search(r"[^a-zA-Z0-9À-ÿ\s]{4,}", texto_sem_divisores):
         return True
 
     # 2. Sequências puramente randômicas sem vogais em palavras longas (ex: "asjdhfiuasdfh")
-    palavras = texto_limpo.split()
+    palavras = texto_sem_divisores.split()
     palavras_sem_sentido = 0
+    vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
     for p in palavras:
-        p_limpo = re.sub(r'[^a-zA-ZÀ-ÿ]', '', p)
+        p_limpo = re.sub(r"[^a-zA-ZÀ-ÿ]", "", p)
         if len(p_limpo) >= 6:
-            vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
             tem_vogal = any(c.lower() in vogais for c in p_limpo)
             if not tem_vogal:
                 palavras_sem_sentido += 1
 
-    # Se houver muitas palavras longas sem vogal, considera gibberish
     if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4 and len(palavras) <= 3:
         return True
 

@@ -120,7 +120,8 @@ class RespostaTurno(BaseModel):
     provedor_efetivo: str | None = None
     tentativas_fallback: list[TentativaFallback] = Field(default_factory=list)
     latencia_ms: int = 0
-
+    regras_disparadas: list[str] = Field(default_factory=list)
+    
     @classmethod
     def de_resposta_agente(
         cls,
