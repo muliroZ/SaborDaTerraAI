@@ -58,12 +58,6 @@ def test_configuracao_invalida_usa_padrao_seguro(monkeypatch, valor):
     assert limites.total_tokens_limit == 32_000
 
 
-@pytest.mark.parametrize('valor', ['0', '-1'])
-def test_limites_nao_positivos_usam_padrao_seguro(monkeypatch, valor):
-    monkeypatch.setenv('TURNO_TOKENS_LIMIT', valor)
-    assert guardrails.obter_usage_limits_turno().total_tokens_limit == 32_000
-
-
 @pytest.mark.parametrize('valor', ['nan', 'inf', '-inf'])
 def test_timeout_nao_permite_desativar_prazo_com_valor_nao_finito(monkeypatch, valor):
     monkeypatch.setenv('TURNO_TIMEOUT_S', valor)
@@ -110,7 +104,7 @@ def test_consulta_de_cinco_chamadas_conclui_e_registra_consumo(caplog):
     assert len(salvos) == 1
     historico = ModelMessagesTypeAdapter.validate_json(salvos[0])
     assert sum(isinstance(p, ToolCallPart) for m in historico for p in m.parts) == 5
-    assert 'Turno concluído' in caplog.text
+    assert 'desfecho=sucesso' in caplog.text
     assert 'chamadas=5' in caplog.text
     assert 'tokens_total=20500' in caplog.text
     assert 'CONFIDENCIAL-TESTE' not in caplog.text

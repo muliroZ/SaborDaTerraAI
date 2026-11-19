@@ -69,7 +69,7 @@ def obter_limites_configurados() -> dict[str, int]:
         try:
             parsed = int(val.strip())
         except (ValueError, TypeError):
-            raise ValueError(f'{var_name} deve ser um inteiro positivo, recebido {val!r}.') from None
+            return int(default_val)
         if parsed <= 0:
             return int(default_val)
         return parsed
