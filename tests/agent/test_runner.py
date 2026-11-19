@@ -18,7 +18,7 @@ from sabor.agent.runner import (
     criar_agente,
     processar_turno,
 )
-from sabor.agent.schemas import RespostaTurno
+from sabor.agent.schemas import RespostaTurno, RetornoAntecipado
 
 
 class _MascaradorFake:
@@ -111,8 +111,8 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
         '2_guardrail_entrada',
         '3_pydantic_ai',
         '3_pydantic_ai',
-        f'5a_auditoria:{MODELO_PRIMARIO}',
         '5b_salvar_memoria:sess-100',
+        f'5a_auditoria:{MODELO_PRIMARIO}',
     ]
     assert turno.bloqueado_guardrail is False
     assert turno.falha_segura is False
@@ -156,6 +156,33 @@ def test_processar_turno_retorno_antecipado_guardrail_entrada():
     assert chamou_llm is False
 
 
+def test_retorno_antecipado_grava_memoria_antes_da_auditoria():
+    eventos = []
+
+    def salvar(sid, mensagem, turno):
+        eventos.append(('memoria', sid, mensagem))
+        return 456
+
+    def auditar(turno, *, message_id):
+        eventos.append(('auditoria', message_id, turno.trace_id, turno.cache_hit))
+
+    turno = processar_turno(
+        'sess-audit',
+        'resposta do cache',
+        deps=AgentDeps(conn=MagicMock()),
+        guardrail_entrada=lambda _: RetornoAntecipado(
+            motivo='CACHE_HIT', mensagem='resposta reaproveitada'
+        ),
+        salvar_memoria=salvar,
+        registrar_auditoria=auditar,
+    )
+
+    assert eventos[0] == ('memoria', 'sess-audit', 'resposta do cache')
+    assert eventos[1][0:2] == ('auditoria', 456)
+    assert eventos[1][2] == turno.trace_id
+    assert eventos[1][3] is True
+
+
 def test_processar_turno_falha_segura_quando_todos_provedores_falham():
     def fn_erro_503(messages, info: AgentInfo) -> ModelResponse:
         raise ModelHTTPError(status_code=503, model_name='m', body='down')
@@ -179,6 +206,8 @@ def test_processar_turno_falha_segura_quando_todos_provedores_falham():
 
     assert turno.falha_segura is True
     assert turno.bloqueado_guardrail is False
+    assert turno.modelo_efetivo is None
+    assert turno.provedor_efetivo is None
     assert turno.texto == MENSAGEM_FALHA_SEGURA
     assert [t.modelo for t in turno.tentativas_fallback] == [MODELO_PRIMARIO, MODELO_FALLBACK_1]
     assert len(auditoria_recebida) == 1

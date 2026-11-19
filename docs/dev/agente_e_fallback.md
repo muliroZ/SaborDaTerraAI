@@ -235,7 +235,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
-> **Implementação da `#31`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens`, `obter_ou_criar_sessao_ativa`, gravação de todos os desfechos do turno, histórico completo serializado com `new_messages_json()` e restaurado por `ModelMessagesTypeAdapter`, limitado por `MEMORIA_MAX_TURNOS` (padrão 6). Turnos barrados/falhas ficam no relatório, mas não voltam ao prompt. Sem `DATASET_VERSION`, o runner calcula um SHA-256 do conteúdo operacional/documental no PostgreSQL para versionar o cache. `auditoria_mensagens.sessao_id` referencia `sessoes.id` com `ON DELETE SET NULL`, relação de 0..N auditorias por sessão.
+> **Implementação da `#31`** em [`src/sabor/agent/memoria.py`](../../src/sabor/agent/memoria.py): tabelas `sessoes`/`mensagens`, `obter_ou_criar_sessao_ativa`, gravação de todos os desfechos do turno, histórico completo serializado com `new_messages_json()` e restaurado por `ModelMessagesTypeAdapter`, limitado por `MEMORIA_MAX_TURNOS` (padrão 6). Turnos barrados/falhas ficam no relatório, mas não voltam ao prompt. A versão SHA-256 é publicada após as cargas em `dataset_metadata` e lida pelo runner para versionar o cache.
 >
 > **Decisão de contrato:** `sessoes.id` e as FKs permanecem `text`, com UUID gerado por padrão. Isso conserva compatibilidade com `processar_turno(sessao_id: str)`, testes/integrações legadas e auditoria; o requisito literal de tipo `uuid` da #31 fica como desvio documentado a aprovar, pois migrar exige converter IDs legados e coordenar a #35.
 
@@ -277,11 +277,10 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 ---
 
 ### 📋 Issue `#35` — Auditoria por Mensagem: Tabela e Gravação (Etapa 5a)
-- **O que já está pronto no agente:**
-  - O `RespostaTurno` já entrega prontos: `sessao_id`, `usuario`, `texto`, `fontes`, `flags`, `modelo_efetivo`, `provedor_efetivo`, `tentativas_fallback`, `bloqueado_guardrail`, `falha_segura`, `cache_hit` (`#36`) e `latencia_ms`.
-  - A coluna `auditoria_mensagens.cache_hit` (`boolean`, padrão `false`) já existe no schema (`#36`).
-- **O que a Issue `#35` precisa fazer quando ficar pronta:**
-  - Implementar a função `registrar_auditoria(turno: RespostaTurno) -> None` que faz o `INSERT INTO auditoria_mensagens` (usando `conectar()` normal de escrita) e plugá-la no parâmetro `registrar_auditoria` do `processar_turno`.
+- A função [`registrar_auditoria`](../../src/sabor/agent/auditoria.py) grava uma linha por resposta, ligada ao `message_id` da mensagem do assistente. A UI chama o hook após persistir o turno; retornos antecipados, cache hit, orçamento esgotado e falhas seguras também passam pelo hook.
+- A auditoria armazena modelo/provedor, ferramentas, fontes, regras, retorno antecipado, `cache_hit` (`#36`), tokens, latência e `trace_id`; não copia texto de pergunta/resposta e mascara PII em valores textuais de fontes/regras.
+- `auditoria_mensagens.sessao_id` referencia `sessoes.id` e `(message_id, sessao_id)` referencia a mensagem correspondente. Índice único em `message_id` limita a uma auditoria por mensagem. Constraints `NOT VALID` mantêm linhas históricas válidas e verificam novas gravações.
+- A cardinalidade também está representada no ER de [`docs/README.md`](../README.md#modelo-de-dados).
 
 ---
 

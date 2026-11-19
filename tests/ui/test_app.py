@@ -33,7 +33,8 @@ class AgenteFalso:
     def __call__(self, sessao_id, mensagem, usuario, *, carregar_memoria, salvar_memoria, **kw):
         historico = carregar_memoria(sessao_id)
         turno = self._responder(sessao_id, mensagem, usuario, historico, **kw)
-        salvar_memoria(sessao_id, mensagem.strip(), turno)  # Etapa 5b, como o orquestrador
+        message_id = salvar_memoria(sessao_id, mensagem.strip(), turno)  # Etapa 5b
+        kw['registrar_auditoria'](turno, message_id=message_id)  # Etapa 5a
         return turno
 
     def _responder(self, sessao_id, mensagem, usuario, historico, **kwargs):
@@ -140,6 +141,17 @@ def test_turno_exibe_resposta_fontes_flags_rascunhos_e_persiste(agente_falso, co
 
     sessao = sess.sessao_ativa(conn_temporaria, 'Dona Lúcia')
     assert sessao.total_mensagens == 2
+    auditoria = conn_temporaria.execute(
+        'SELECT a.message_id, a.sessao_id, a.usuario_id, a.perfil, a.modelo, '
+        'a.fontes, a.ferramentas, a.trace_id, a.mensagem_usuario, a.resposta_assistente '
+        'FROM auditoria_mensagens a JOIN mensagens m ON m.id = a.message_id '
+        'WHERE a.sessao_id = %s AND m.papel = \'assistente\'',
+        (sessao.id,),
+    ).fetchone()
+    assert auditoria[:5] == (auditoria[0], sessao.id, 'Dona Lúcia', 'funcionario', 'modelo-falso')
+    assert auditoria[5] == [{'arquivo': 'lotes.csv', 'referencia': 'LOT-2026-0089'}]
+    assert auditoria[6] == []
+    assert auditoria[7] and auditoria[8:] == (None, None)
 
     # Segundo turno recebe o primeiro como memória (contexto "e para o hotel?").
     recarregada.chat_input[0].set_value('e para o hotel?').run()

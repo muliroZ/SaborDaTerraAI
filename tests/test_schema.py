@@ -24,6 +24,8 @@ from sabor.db import (
     schema_sql,
     tabelas_existentes,
 )
+from sabor.agent.auditoria import registrar_auditoria
+from sabor.agent.schemas import Fonte, RespostaTurno
 
 
 def test_role_readonly_definida_no_schema_sem_senha_exposta():
@@ -74,6 +76,74 @@ def test_criar_schema_e_idempotente(conn):
     criar_schema(conn)
     criar_schema(conn)
     assert sorted(tabelas_existentes(conn)) == sorted(TABELAS)
+
+
+def test_auditoria_liga_resposta_a_mensagem_e_sessao(conn):
+    with conn.transaction(force_rollback=True):
+        conn.execute(
+            "INSERT INTO sessoes (id, usuario_id, perfil) "
+            "VALUES ('sess-audit', 'Dona Lúcia', 'funcionario')"
+        )
+        message_id = conn.execute(
+            "INSERT INTO mensagens (sessao_id, papel, conteudo) "
+            "VALUES ('sess-audit', 'assistente', '{}'::jsonb) RETURNING id"
+        ).fetchone()[0]
+        turno = RespostaTurno(
+            sessao_id='sess-audit',
+            usuario='Dona Lúcia',
+            texto='Resposta com CPF 123.456.789-00, que não deve ir para a auditoria',
+            fontes=[Fonte(arquivo='produtores.csv', referencia='CPF 123.456.789-00')],
+            regras_disparadas=['4B_SEM_FONTE_FACTUAL'],
+            modelo_efetivo='gemini-3.5-flash-lite',
+            provedor_efetivo='google',
+            ferramentas=['buscar_produtores'],
+            tokens_entrada=123,
+            tokens_saida=45,
+            trace_id='trace-test-35',
+        )
+
+        registrar_auditoria(
+            conn,
+            message_id=message_id,
+            usuario_id='Dona Lúcia',
+            perfil='funcionario',
+            turno=turno,
+        )
+
+        row = conn.execute(
+            'SELECT message_id, sessao_id, usuario_id, perfil, modelo, provedor, '
+            'ferramentas, fontes, regras_disparadas, retorno_antecipado, cache_hit, '
+            'tokens_entrada, tokens_saida, trace_id, mensagem_usuario, resposta_assistente '
+            'FROM auditoria_mensagens WHERE message_id = %s',
+            (message_id,),
+        ).fetchone()
+        assert row[:6] == (
+            message_id, 'sess-audit', 'Dona Lúcia', 'funcionario',
+            'gemini-3.5-flash-lite', 'google',
+        )
+        assert row[6] == ['buscar_produtores']
+        assert row[7] == [{'arquivo': 'produtores.csv', 'referencia': 'CPF [CPF_1]'}]
+        assert row[8] == ['4B_SEM_FONTE_FACTUAL']
+        assert row[9:14] == (None, False, 123, 45, 'trace-test-35')
+        # A auditoria não duplica em claro o texto do usuário nem a resposta.
+        assert row[14:] == (None, None)
+        assert '123.456.789-00' not in str(row)
+
+
+def test_auditoria_rejeita_sessao_ou_mensagem_sem_relacao(conn):
+    with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+        conn.execute("INSERT INTO auditoria_mensagens (sessao_id) VALUES ('sessao-inexistente')")
+
+    with conn.transaction(force_rollback=True):
+        conn.execute(
+            "INSERT INTO sessoes (id, usuario_id, perfil) "
+            "VALUES ('sess-audit-fk', 'Dona Lúcia', 'funcionario')"
+        )
+        with pytest.raises(psycopg.errors.ForeignKeyViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO auditoria_mensagens (message_id, sessao_id) "
+                "VALUES (999999, 'sess-audit-fk')"
+            )
 
 
 def test_embedding_e_indice_hnsw(conn):

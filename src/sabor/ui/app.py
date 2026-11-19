@@ -26,6 +26,7 @@ from pydantic_ai.messages import ModelMessage
 import streamlit as st
 
 from sabor.agent import memoria as sess
+from sabor.agent.auditoria import registrar_auditoria as gravar_auditoria
 from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.cache import CacheRespostas
 from sabor.agent.deps import obter_data_referencia
@@ -145,6 +146,8 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
     max_turnos = sess.max_turnos_memoria()
     gravado = False
     erro_persistencia = False
+    auditada = False
+    message_id_turno: int | None = None
 
     def carregar_memoria(sid: str) -> list[ModelMessage]:  # Etapa 1
         nonlocal erro_persistencia
@@ -158,15 +161,39 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
     def salvar_memoria(
         sid: str, msg: str, turno: RespostaTurno,
         historico_modelo_json: str | None = None,
-    ) -> None:  # Etapa 5b
-        nonlocal gravado, erro_persistencia
+    ) -> int:  # Etapa 5b
+        nonlocal gravado, erro_persistencia, message_id_turno
         try:
             with conexao() as conn:
-                sess.registrar_turno(conn, sid, msg, turno, historico_modelo_json)
+                message_id_turno = sess.registrar_turno(
+                    conn, sid, msg, turno, historico_modelo_json
+                )
         except psycopg.Error:
             erro_persistencia = True
             raise
         gravado = True
+        return message_id_turno
+
+    def registrar_auditoria(
+        turno: RespostaTurno, *, message_id: int | None = None
+    ) -> None:  # Etapa 5a
+        nonlocal auditada, erro_persistencia
+        id_mensagem = message_id if message_id is not None else message_id_turno
+        if id_mensagem is None:
+            raise RuntimeError('Não foi possível auditar o turno sem uma mensagem persistida.')
+        try:
+            with conexao() as conn:
+                gravar_auditoria(
+                    conn,
+                    message_id=id_mensagem,
+                    usuario_id=usuario_id,
+                    perfil=sess.perfil_do_usuario(usuario_id),
+                    turno=turno,
+                )
+        except psycopg.Error:
+            erro_persistencia = True
+            raise
+        auditada = True
 
     try:
         return processar_turno(
@@ -178,6 +205,7 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
             cache_repo=CacheRespostas(conexao),
             carregar_memoria=carregar_memoria,
             salvar_memoria=salvar_memoria,
+            registrar_auditoria=registrar_auditoria,
         )
     except Exception as exc:
         if isinstance(exc, psycopg.Error) and erro_persistencia:
@@ -193,6 +221,8 @@ def _executar_turno_travado(sessao_id: str, usuario_id: str, mensagem: str) -> R
         )
         if not gravado:
             salvar_memoria(sessao_id, mensagem.strip(), turno)
+        if not auditada:
+            registrar_auditoria(turno, message_id=message_id_turno)
         return turno
 
 

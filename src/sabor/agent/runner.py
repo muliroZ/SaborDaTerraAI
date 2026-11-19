@@ -20,7 +20,13 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded
 )
-from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
@@ -409,11 +415,40 @@ def processar_turno(
     carregar_memoria: Callable[[str], Sequence[ModelMessage]] | None = None,  # Etapa 1 (#31)
     guardrail_entrada: Callable[[str], RetornoAntecipado | str | None] | None = None,  # Etapa 2
     pos_processar: Callable[[RespostaAgente], RespostaAgente] | None = None,  # Etapa 4
-    registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
-    salvar_memoria: Callable[..., None] | None = None,  # Etapa 5b (#31)
+    registrar_auditoria: Callable[..., None] | None = None,  # Etapa 5a (#35)
+    salvar_memoria: Callable[..., int | None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
     """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados."""
     inicio = time.perf_counter()
+
+    def persistir_e_auditar(
+        turno: RespostaTurno, historico_modelo_json: str | None = None
+    ) -> None:
+        """Salva a mensagem primeiro para obter seu id e então grava a auditoria vinculada."""
+        message_id = None
+        if salvar_memoria is not None:
+            try:
+                parametros = inspect.signature(salvar_memoria).parameters
+            except (TypeError, ValueError):
+                parametros = {}
+            if 'historico_modelo_json' in parametros:
+                message_id = salvar_memoria(
+                    sessao_id,
+                    mensagem.strip(),
+                    turno,
+                    historico_modelo_json=historico_modelo_json,
+                )
+            else:
+                message_id = salvar_memoria(sessao_id, mensagem.strip(), turno)
+        if registrar_auditoria is not None:
+            try:
+                parametros = inspect.signature(registrar_auditoria).parameters
+            except (TypeError, ValueError):
+                parametros = {}
+            if 'message_id' in parametros:
+                registrar_auditoria(turno, message_id=message_id)
+            else:
+                registrar_auditoria(turno)
 
     # -----------------------------------------------------------------------
     # Etapa 1: Carregar memória da sessão (Issue #31)
@@ -491,10 +526,7 @@ def processar_turno(
                 cache_hit=eh_cache_hit,
                 latencia_ms=latencia_ms,
             )
-            if registrar_auditoria is not None:
-                registrar_auditoria(turno_antecipado)
-            if salvar_memoria is not None:
-                salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
+            persistir_e_auditar(turno_antecipado)
             return turno_antecipado
 
         # -----------------------------------------------------------------------
@@ -566,10 +598,7 @@ def processar_turno(
             retorno_antecipado=retorno_orcamento,
             latencia_ms=latencia_ms,
         )
-        if registrar_auditoria is not None:
-            registrar_auditoria(turno_orcamento)
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_orcamento)
+        persistir_e_auditar(turno_orcamento)
         return turno_orcamento
     except (
         TimeoutError,
@@ -589,12 +618,9 @@ def processar_turno(
             tentativas_fallback=tentativas_erro,
             latencia_ms=latencia_ms,
         )
-        if registrar_auditoria is not None:
-            registrar_auditoria(turno_falha)
         # Grava também a falha segura para o histórico exibido ficar coerente; a memória
         # (#31) não a repassa ao modelo nos turnos seguintes.
-        if salvar_memoria is not None:
-            salvar_memoria(sessao_id, mensagem_limpa, turno_falha)
+        persistir_e_auditar(turno_falha)
         return turno_falha
 
     # -----------------------------------------------------------------------
@@ -654,6 +680,19 @@ def processar_turno(
         tentativas_fallback=tentativas,
         latencia_ms=latencia_ms,
     )
+    ferramentas = list(dict.fromkeys(
+        part.tool_name
+        for msg in resultado.new_messages()
+        for part in getattr(msg, 'parts', ())
+        if isinstance(part, ToolCallPart) and part.tool_name != 'final_result'
+    ))
+    turno = turno.model_copy(
+        update={
+            'ferramentas': ferramentas,
+            'tokens_entrada': getattr(uso, 'input_tokens', None),
+            'tokens_saida': getattr(uso, 'output_tokens', None),
+        }
+    )
     bloqueado_guardrail_saida = bool(regras_saida)
     if regras_saida:
         turno = turno.model_copy(
@@ -663,30 +702,15 @@ def processar_turno(
             }
         )
 
-    if registrar_auditoria is not None:
-        registrar_auditoria(turno)
-    if salvar_memoria is not None:
-        historico_json = None
-        if not bloqueado_guardrail_saida:
-            historico_json = resultado.new_messages_json()
-            if isinstance(historico_json, bytes):
-                historico_json = historico_json.decode('utf-8')
-            mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
-            if callable(mascarar_fn):
-                historico_json = _mascarar_historico_json(historico_json, mascarar_fn)
-        try:
-            suporta_historico = (
-                'historico_modelo_json' in inspect.signature(salvar_memoria).parameters
-            )
-        except (TypeError, ValueError):
-            suporta_historico = False
-        if suporta_historico:
-            salvar_memoria(
-                sessao_id, mensagem_limpa, turno,
-                historico_modelo_json=historico_json,
-            )
-        else:
-            salvar_memoria(sessao_id, mensagem_limpa, turno)
+    historico_json = None
+    if not bloqueado_guardrail_saida:
+        historico_json = resultado.new_messages_json()
+        if isinstance(historico_json, bytes):
+            historico_json = historico_json.decode('utf-8')
+        mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+        if callable(mascarar_fn):
+            historico_json = _mascarar_historico_json(historico_json, mascarar_fn)
+    persistir_e_auditar(turno, historico_json)
 
     # -----------------------------------------------------------------------
     # Etapa 5b: Atualizar o cache de respostas estáticas (#36)

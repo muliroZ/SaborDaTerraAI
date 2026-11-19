@@ -352,16 +352,29 @@ FROM chunks c
 JOIN documentos d USING (arquivo);
 
 -- ---------------------------------------------------------------------------
--- Auditoria de Mensagens (#6)
+-- Auditoria de Mensagens (#35)
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS auditoria_mensagens (
     id                  bigserial PRIMARY KEY,
+    message_id          bigint,
+    usuario_id          text,
+    perfil              text,
+    modelo              text,
+    provedor            text,
+    ferramentas         jsonb NOT NULL DEFAULT '[]',
+    fontes              jsonb NOT NULL DEFAULT '[]',
+    regras_disparadas   jsonb NOT NULL DEFAULT '[]',
+    retorno_antecipado  text,
+    cache_hit           boolean NOT NULL DEFAULT false,
+    trace_id            text,
+    criada_em           timestamptz NOT NULL DEFAULT now(),
+    -- Colunas legadas mantidas para não descartar auditorias já gravadas.
     pedido_id           text REFERENCES pedidos (id) ON DELETE SET NULL,
     sessao_id           text,
     canal               text,
-    mensagem_usuario    text NOT NULL,
-    resposta_assistente text NOT NULL,
+    mensagem_usuario    text,
+    resposta_assistente text,
     fontes_citadas      text[] NOT NULL DEFAULT '{}',
     ferramentas_usadas  jsonb NOT NULL DEFAULT '[]', 
     modelo_llm          text,
@@ -370,6 +383,25 @@ CREATE TABLE IF NOT EXISTS auditoria_mensagens (
     latencia_ms         integer,
     criado_em           timestamptz NOT NULL DEFAULT now()
 );
+
+-- Migração idempotente da auditoria legada (#35). Registros antigos permanecem válidos;
+-- a aplicação preenche as novas colunas para toda resposta gravada daqui em diante.
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS message_id bigint;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS usuario_id text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS perfil text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS modelo text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS provedor text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS ferramentas jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS fontes jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS regras_disparadas jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS retorno_antecipado text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS cache_hit boolean NOT NULL DEFAULT false;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS trace_id text;
+ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS criada_em timestamptz NOT NULL DEFAULT now();
+-- Colunas de conteúdo antigas deixam de ser obrigatórias: a auditoria nova não persiste
+-- mensagens, para evitar copiar PII em claro para esta tabela.
+ALTER TABLE auditoria_mensagens ALTER COLUMN mensagem_usuario DROP NOT NULL;
+ALTER TABLE auditoria_mensagens ALTER COLUMN resposta_assistente DROP NOT NULL;
 
 -- Versão do dataset publicada ao fim do ETL/ingestão; lida pelo cache da Etapa 2.
 CREATE TABLE IF NOT EXISTS dataset_metadata (
@@ -380,9 +412,7 @@ CREATE TABLE IF NOT EXISTS dataset_metadata (
 
 CREATE INDEX IF NOT EXISTS auditoria_pedido_idx ON auditoria_mensagens (pedido_id);
 CREATE INDEX IF NOT EXISTS auditoria_criado_idx ON auditoria_mensagens (criado_em DESC);
-
--- Turno respondido pelo cache de respostas estáticas, sem chamar o LLM (2b, #36).
-ALTER TABLE auditoria_mensagens ADD COLUMN IF NOT EXISTS cache_hit boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS auditoria_criada_idx ON auditoria_mensagens (criada_em DESC);
 
 -- ---------------------------------------------------------------------------
 -- Cache de respostas estáticas (etapas 2b e 5b — #36)
@@ -461,6 +491,27 @@ COMMENT ON COLUMN mensagens.conteudo IS
     'rascunhos, retorno antecipado, modelo e latência).';
 
 CREATE INDEX IF NOT EXISTS mensagens_sessao_idx ON mensagens (sessao_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS mensagens_id_sessao_uq ON mensagens (id, sessao_id);
+
+-- Uma mensagem de assistente tem no máximo uma auditoria. `NOT VALID` preserva registros
+-- históricos sem vínculo; novas auditorias precisam apontar para uma mensagem existente.
+CREATE UNIQUE INDEX IF NOT EXISTS auditoria_mensagens_message_id_uq
+    ON auditoria_mensagens (message_id) WHERE message_id IS NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'auditoria_mensagens_message_id_fkey'
+          AND conrelid = 'auditoria_mensagens'::regclass
+    ) THEN
+        ALTER TABLE auditoria_mensagens
+            ADD CONSTRAINT auditoria_mensagens_message_id_fkey
+            FOREIGN KEY (message_id, sessao_id) REFERENCES mensagens (id, sessao_id)
+            ON DELETE SET NULL NOT VALID;
+    END IF;
+END
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Role somente leitura para o agente (apenas SELECT)

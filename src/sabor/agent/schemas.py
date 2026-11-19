@@ -2,7 +2,8 @@
 
 from collections.abc import Sequence
 
-from typing import Literal, Optional
+from typing import Literal
+from uuid import uuid4
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai.messages import ModelRequestAttempt
@@ -125,6 +126,10 @@ class RespostaTurno(BaseModel):
     tentativas_fallback: list[TentativaFallback] = Field(default_factory=list)
     latencia_ms: int = 0
     regras_disparadas: list[str] = Field(default_factory=list)
+    ferramentas: list[str] = Field(default_factory=list)
+    tokens_entrada: int | None = None
+    tokens_saida: int | None = None
+    trace_id: str = Field(default_factory=lambda: str(uuid4()))
     
     @classmethod
     def de_resposta_agente(
