@@ -29,3 +29,12 @@ uv run sabor                      # abre http://localhost:8501 (equivale a `stre
 ```
 
 Escolha um usuário simulado na barra lateral (equipe da cooperativa ou produtor `P001`…`P018`) e converse pelo chat. A conversa fica no banco: recarregar a página retoma a sessão, e "Nova sessão" oferece o relatório da conversa anterior.
+
+## Triagem em lote da caixa de entrada
+
+```bash
+uv run python scripts/init_db.py                                  # cria a tabela `triagem_pedidos`
+uv run python scripts/triagem_lote.py --csv fila.csv --json fila.json
+```
+
+Roda `extrair_e_classificar_pedido` em todos os `pedidos`, fora do chat, grava em `triagem_pedidos` e mostra a fila ordenada por urgência (crítica → baixa; erros, desatualizados e pendentes no fim). Pedidos já extraídos não voltam ao LLM, mas as regras rodam de novo sobre o banco atual sem gastar tokens; cada pedido respeita o orçamento do turno (`TURNO_TOKENS_LIMIT`/`TURNO_REQUEST_LIMIT`) e o lote tem teto próprio (`TRIAGEM_TOKENS_LIMIT`, padrão 150 mil tokens). Opções: `--limite N`, `--tokens N`, `--reprocessar` e `--somente-exportar` (sem LLM). Na interface, a equipe vê a fila em "Caixa de entrada". Detalhes em [docs/dev/triagem_lote.md](docs/dev/triagem_lote.md).

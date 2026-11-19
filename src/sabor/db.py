@@ -22,6 +22,7 @@ TABELAS = (
     'chunks',
     'documentos',
     'pedido_itens',
+    'triagem_pedidos',
     'pedidos',
     'lotes',
     'financeiro',
