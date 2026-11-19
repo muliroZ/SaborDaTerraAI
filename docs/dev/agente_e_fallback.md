@@ -45,7 +45,7 @@ src/sabor/
     ├── __init__.py          # Ponto de entrada enxuto (AgentDeps, RespostaAgente, RespostaTurno, criar_agente, processar_turno)
     ├── schemas.py           # Modelos Pydantic: Fonte, Flag, Rascunho, RespostaAgente, TentativaFallback, RespostaTurno, RetornoAntecipado
     ├── deps.py              # Contexto injetado: AgentDeps, obter_data_referencia() e MascaradorNoOp
-    ├── fallback.py          # Cadeia ModelFallback (Gemini -> Qwen3 -> Mistral), gatilhos e metadados reais (#37)
+    ├── fallback.py          # Cadeia ModelFallback (Gemini -> Mistral -> Qwen3), gatilhos e metadados reais (#37)
     ├── guardrails.py        # Guardrail de entrada determinístico: escopo, tamanho, prompt injection, cache hook e limites (Etapa 2)
     ├── cache.py             # Cache de respostas estáticas em tabela UNLOGGED: chave, elegibilidade e CacheRespostas (2b/5b, #36)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)

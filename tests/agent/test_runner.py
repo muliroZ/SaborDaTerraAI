@@ -485,6 +485,7 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
 def test_timeouts_configuraveis_pelo_ambiente(monkeypatch):
     import pytest
 
+    from sabor.agent import fallback as modulo_fallback
     from sabor.agent.fallback import (
         TIMEOUT_POR_MODELO_S,
         construir_modelos_padrao,
@@ -492,6 +493,7 @@ def test_timeouts_configuraveis_pelo_ambiente(monkeypatch):
     )
     from sabor.agent.runner import obter_timeout_turno
 
+    monkeypatch.setattr(modulo_fallback, 'load_dotenv', lambda: None)
     monkeypatch.delenv('MODELO_TIMEOUT_S', raising=False)
     monkeypatch.delenv('TURNO_TIMEOUT_S', raising=False)
     assert obter_timeout_por_modelo() == TIMEOUT_POR_MODELO_S == 12.0
@@ -767,6 +769,71 @@ def test_relatorio_continua_anexado_quando_o_guardrail_de_saida_reescreve_o_text
     [relatorio] = turno.relatorios
     assert '[CPF_MASCARADO]' in relatorio.markdown
 
+
+def test_processar_turno_descarta_relatorio_nao_solicitado_e_limpa_citacoes_inline():
+    """Pergunta simples descarta relatórios não pedidos e limpa citações inline do texto."""
+    from sabor.agent.schemas import Relatorio
+
+    def consultar_financeiro_fake(ctx: RunContext[AgentDeps]) -> dict:
+        ctx.deps.relatorios.append(
+            Relatorio(
+                tipo='contas_a_receber',
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas a receber',
+            )
+        )
+        return {
+            'arquivo': 'financeiro.csv',
+            'referencia': 'FIN-2026-013',
+            'valor_total': 6020.0,
+        }
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name='consultar_financeiro_fake', args={})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': (
+                            'A SuperBom deve R$ 6.020,00 para Cícero Romão '
+                            '[financeiro.csv · FIN-2026-013].\n\n'
+                            'Fontes: [financeiro.csv · FIN-2026-013]'
+                        ),
+                        'fontes': [{'arquivo': 'financeiro.csv', 'referencia': 'FIN-2026-013'}],
+                    },
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[consultar_financeiro_fake],
+    )
+    turno = processar_turno(
+        'sess-sem-relatorio',
+        'Quem a SuperBom está devendo e há quanto tempo?',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock()),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.relatorios == []
+    assert turno.texto == 'A SuperBom deve R$ 6.020,00 para Cícero Romão.'
+    assert 'Fontes:' not in turno.texto
+    assert [(f.arquivo, f.referencia) for f in turno.fontes] == [
+        ('financeiro.csv', 'FIN-2026-013')
+    ]
+
+
 def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
     """Regra 4b (#34): fonte citada pelo modelo sem respaldo nas tools do turno é bloqueada."""
 
@@ -816,3 +883,29 @@ def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
     assert any('4B_SEM_FONTE_FACTUAL' in r for r in turno.regras_disparadas)
     assert turno.fontes == []
     assert 'não encontrada' in turno.texto.lower()
+
+
+def test_anexar_relatorios_mantem_relatorio_quando_gerar_relatorio_rodou():
+    """Se `gerar_relatorio` rodou no turno, o anexo não é descartado (o texto o anuncia)."""
+    from sabor.agent.runner import _anexar_relatorios
+    from sabor.agent.schemas import RespostaAgente, Relatorio
+
+    def deps_com_relatorio() -> AgentDeps:
+        deps = AgentDeps(conn=MagicMock())
+        deps.relatorios.append(
+            Relatorio(
+                tipo='contas_a_receber',
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# Contas a receber',
+            )
+        )
+        return deps
+
+    resposta = RespostaAgente(texto='O arquivo está disponível para baixar.')
+
+    mantida = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=True)
+    assert [r.nome_arquivo for r in mantida.relatorios] == ['contas_a_receber_20261030.md']
+
+    descartada = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=False)
+    assert descartada.relatorios == []
