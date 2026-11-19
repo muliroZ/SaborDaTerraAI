@@ -84,3 +84,25 @@ def test_relatorio_da_sessao_no_banco(conn_temporaria):
     assert nome.startswith('relatorio_p002_') and nome.endswith('.md')
     assert '> quanto vendi?' in md and 'R$ 0,00' in md
     assert '(produtor(a))' in md
+
+
+def test_relatorio_da_conversa_lista_relatorios_gerados():
+    from sabor.agent.schemas import Relatorio
+    from sabor.ui.relatorio import _secao_turno
+
+    resposta = RespostaTurno(
+        sessao_id='s',
+        usuario='Dona Lúcia',
+        texto='Pronto.',
+        relatorios=[
+            Relatorio(
+                tipo='contas_a_receber',
+                titulo='Contas a receber',
+                nome_arquivo='contas_a_receber_20261030.md',
+                markdown='# x',
+            )
+        ],
+    )
+    linhas = '\n'.join(_secao_turno(1, None, resposta, None))
+    assert '**Relatórios gerados**' in linhas
+    assert '- Contas a receber (`contas_a_receber_20261030.md`)' in linhas

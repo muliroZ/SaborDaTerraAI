@@ -42,6 +42,7 @@ class ProdutorResultado(BaseModel):
     municipio: str
     status: Literal['ativo', 'inativo']
     produtos: list[str]
+    produtos_origem_animal: list[str] = Field(default_factory=list)
     certificacao_organica_declarada: bool
     certificacao_organica_vigente: bool
     validade_certificacao: date | None
@@ -130,7 +131,10 @@ def buscar_produtores(
                p.chave_pix, p.banco, p.agencia, p.conta_corrente,
                p.dap_caf, p.registro_sie,
                COALESCE(ARRAY_AGG(DISTINCT pr.nome) FILTER (WHERE pr.nome IS NOT NULL), '{{}}')
-                   AS produtos
+                   AS produtos,
+               COALESCE(
+                   ARRAY_AGG(DISTINCT pr.nome) FILTER (WHERE pr.origem_animal), '{{}}'
+               ) AS produtos_origem_animal
         FROM produtores p
         LEFT JOIN produtor_produtos pp ON pp.produtor_id = p.id
         LEFT JOIN produtos pr ON pr.id = pp.produto_id
@@ -160,6 +164,7 @@ def buscar_produtores(
             dap,
             sie,
             produtos_lista,
+            produtos_animais,
         ) = row
         vigente = bool(org_decl) and validade is not None and validade >= data_referencia
         resultado.append(
@@ -169,6 +174,7 @@ def buscar_produtores(
                 municipio=municipio_,
                 status=status,
                 produtos=list(produtos_lista or []),
+                produtos_origem_animal=list(produtos_animais or []),
                 certificacao_organica_declarada=bool(org_decl),
                 certificacao_organica_vigente=vigente,
                 validade_certificacao=validade,
@@ -641,3 +647,59 @@ def consultar_safra(
         produtores=produtores,
         fonte=Fonte(arquivo='sazonalidade.csv', referencia=f'{nome} · mês {mes_num}'),
     )
+
+
+# =============================================================================
+# 6. listar_lotes (apoio aos relatórios, Issue #15)
+# =============================================================================
+
+
+class LoteResumo(BaseModel):
+    lote_id: str
+    produto: str
+    produtor_id: str
+    data_colheita: date
+    data_entrega: date
+    comprador: str | None
+    fonte: Fonte
+
+
+def listar_lotes(
+    ctx: RunContext[AgentDeps],
+    *,
+    produtor_id: str | None = None,
+) -> list[LoteResumo]:
+    """Lista os lotes do mais recente para o mais antigo (por data de colheita/fabricação).
+
+    Não é exportada em `sabor.tools`, então não vira tool do agente: serve aos relatórios
+    (#15), que precisam dos últimos lotes de cada produto. Aplica o mesmo filtro de perfil
+    das demais consultas.
+    """
+    conn = ctx.deps.conn
+    usuario = _resolver_usuario(ctx.deps.usuario)
+    produtor_id_filtro = _aplicar_filtro_produtor(usuario, produtor_id)
+
+    where_sql = 'WHERE l.produtor_id = %s' if produtor_id_filtro is not None else ''
+    parametros = [produtor_id_filtro] if produtor_id_filtro is not None else []
+    linhas = conn.execute(
+        f"""
+        SELECT l.lote_id, l.produto, l.produtor_id, l.data_colheita, l.data_entrega,
+               COALESCE(l.comprador_normalizado, l.comprador)
+        FROM lotes l
+        {where_sql}
+        ORDER BY l.data_colheita DESC, l.lote_id DESC
+        """,
+        parametros,
+    ).fetchall()
+    return [
+        LoteResumo(
+            lote_id=lid,
+            produto=produto,
+            produtor_id=pid,
+            data_colheita=colheita,
+            data_entrega=entrega,
+            comprador=_mascarar_opcional(ctx.deps.mascarador, comprador),
+            fonte=Fonte(arquivo='lotes.csv', referencia=lid),
+        )
+        for lid, produto, pid, colheita, entrega, comprador in linhas
+    ]

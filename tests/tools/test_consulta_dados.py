@@ -140,6 +140,7 @@ def test_buscar_produtores_filtra_por_id_e_nome_e_respeita_rbac():
                         'DAP-1',
                         'PE-SIE-001',
                         ['queijo coalho'],
+                        ['queijo coalho'],  # produtos de origem animal (#15)
                     )
                 ]
             )

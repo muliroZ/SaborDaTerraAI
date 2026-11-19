@@ -9,7 +9,14 @@ from streamlit.testing.v1 import AppTest
 
 import sabor.agent
 from sabor.agent import memoria as sess
-from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
+from sabor.agent.schemas import (
+    Flag,
+    Fonte,
+    Rascunho,
+    Relatorio,
+    RespostaTurno,
+    RetornoAntecipado,
+)
 from sabor.tools.pedidos import modelo_extracao
 from sabor.triagem import hash_entrada
 
@@ -38,6 +45,20 @@ class AgenteFalso:
                 **kwargs,
             }
         )
+        if 'relatório' in mensagem:
+            return RespostaTurno(
+                sessao_id=sessao_id,
+                usuario=usuario,
+                texto='Gerei o relatório de contas a receber.',
+                relatorios=[
+                    Relatorio(
+                        tipo='contas_a_receber',
+                        titulo='Contas a receber · vencidos × a vencer',
+                        nome_arquivo='contas_a_receber_20261030.md',
+                        markdown='# Contas a receber\n\n- **Vencido:** R$ 8.690,00',
+                    )
+                ],
+            )
         if 'piada' in mensagem:
             return RespostaTurno(
                 sessao_id=sessao_id,
@@ -308,3 +329,20 @@ def test_erro_psycopg_interno_no_turno_nao_mascara_como_falha_ao_gravar(
         'pergunta com erro interno de banco',
         app.MENSAGEM_FALHA_SEGURA,
     ]
+
+
+def test_relatorio_sob_demanda_tem_download_e_persiste(agente_falso):
+    at = _app('Seu Antônio')
+    at.chat_input[0].set_value('gera o relatório de contas a receber').run()
+
+    assert not at.exception
+    assert 'Gerei o relatório de contas a receber.' in _textos(at)
+    downloads = at.get('download_button')
+    assert len(downloads) == 1
+    assert 'contas_a_receber_20261030.md' in downloads[0].proto.label
+    assert any(e.label == 'Pré-visualizar relatório' for e in at.expander)
+    assert 'R$ 8.690,00' in _textos(at)
+
+    # Recarregar a página mantém o relatório no histórico (salvo junto com o turno).
+    recarregada = _app('Seu Antônio')
+    assert len(recarregada.get('download_button')) == 1
