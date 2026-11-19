@@ -14,7 +14,7 @@ from pydantic_ai.usage import UsageLimits
 from sabor.agent.schemas import RetornoAntecipado
 
 MENSAGEM_ESCOPO_AMIGAVEL = (
-    "Olá! Sou o assistente operacional da **Cooperativa Sabor da Terra**. "
+    "Olá! Sou o **CajAI**, assistente operacional da **Cooperativa Sabor da Terra**. "
     "Posso ajudar apenas com assuntos da nossa operação:\n"
     "- **Triagem e interpretação de pedidos** (quantidades, produtos, prazos);\n"
     "- **Consultas operacionais e documentais** (estoque, saldos, certificações orgânicas e laudos sanitários);\n"

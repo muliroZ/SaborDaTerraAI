@@ -271,7 +271,8 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Relatórios sob demanda (`#15`):** cada `turno.relatorios` vira um bloco com `st.download_button` (`.md`) e pré-visualização, também nas mensagens do histórico.
 - **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular; completo para a equipe interna, como o texto restaurado na etapa 4c, e com dados pessoais ocultos/mascarados e só os próprios registros para o perfil produtor), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
 - **Nova sessão:** diálogo com "Baixar relatório da conversa" (`ui/relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
-- **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos), status do banco e sugestões de perguntas da demo por perfil.
+- **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos) e status do banco.
+- **Sugestões de perguntas** da demo por perfil: balões na área do chat, abaixo da saudação do CajAI; com a conversa em andamento, ficam no botão "Sugestões de perguntas" no fim do chat (#56).
 
 ---
 

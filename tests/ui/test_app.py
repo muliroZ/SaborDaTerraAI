@@ -19,6 +19,7 @@ from sabor.agent.schemas import (
 )
 from sabor.tools.pedidos import modelo_extracao
 from sabor.triagem import hash_entrada
+from sabor.ui import apresentacao as ap
 
 UI = str(Path(__file__).resolve().parents[2] / 'src' / 'sabor' / 'ui' / 'app.py')
 
@@ -102,14 +103,17 @@ def test_pagina_inicial_sem_conversa(agente_falso):
     at = _app('Seu Antônio')
 
     assert not at.exception
-    assert at.title[0].value == 'Assistente Sabor da Terra'
+    assert at.title[0].value == 'CajAI'
     assert not at.chat_input[0].disabled
     seletor = at.selectbox(key='usuario')
     assert seletor.value == 'Seu Antônio'
     assert len(seletor.options) == 20
     assert 'Data de referência' in _textos(at)
     assert 'Banco conectado' in _textos(at)
+    # Sugestões em balões na área do chat, não mais na sidebar (#56).
     assert at.button(key='sugestao_0') is not None
+    assert all(not (b.key or '').startswith('sugestao') for b in at.sidebar.button)
+    assert 'CajAI' in _textos(at)
 
 
 def test_turno_exibe_resposta_fontes_flags_rascunhos_e_persiste(agente_falso, conn_temporaria):
@@ -167,6 +171,19 @@ def test_sugestao_envia_pergunta(agente_falso):
         == 'Quanto eu vendi em setembro e o que tenho a receber?'
     )
     assert agente_falso.chamadas[-1]['usuario'] == 'P005'
+
+
+def test_sugestoes_seguem_disponiveis_durante_a_conversa(agente_falso):
+    at = _app('P008')
+    at.button(key='sugestao_0').click().run()
+
+    # A saudação com os balões some; as sugestões ficam no botão compacto do fim do chat.
+    with pytest.raises(KeyError):
+        at.button(key='sugestao_0')
+    at.button(key='sugestao_conversa_1').click().run()
+
+    assert not at.exception
+    assert agente_falso.chamadas[-1]['mensagem'] == ap.SUGESTOES_PRODUTOR[1]
 
 
 def test_usuarios_tem_sessoes_isoladas(agente_falso):
