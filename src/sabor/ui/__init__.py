@@ -1,1 +1,1 @@
-"""Interface Streamlit (#13): app, regras de apresentação e relatório da conversa (#38)."""
+"""Interface Streamlit (#13): app e regras de apresentação."""

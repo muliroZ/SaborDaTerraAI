@@ -395,3 +395,30 @@ def test_chat_input_fica_travado_enquanto_turno_executa(agente_falso, monkeypatc
     assert not at.exception
     assert chamadas_input == [('entrada_bloqueada', True), ('entrada', False)]
     assert not at.chat_input[0].disabled
+
+
+
+def test_nova_sessao_oferece_relatorio_e_comeca_sem_contexto(agente_falso, conn_temporaria):
+    """Critério de aceite da #38 na interface."""
+    at = _app('Dona Lúcia')
+    at.chat_input[0].set_value('pergunta da demo').run()
+    sessao_demo = agente_falso.chamadas[-1]['sessao_id']
+
+    _botao(at, 'Nova sessão').click().run()
+    assert not at.exception
+    rotulos = [d.proto.label for d in at.get('download_button')]
+    assert 'Baixar relatório da conversa' in rotulos
+    assert '> pergunta da demo' in _textos(at)  # pré-visualização do relatório
+    assert _botao(at, 'Encerrar e iniciar nova sessão') is not None
+
+    # O AppTest não reexecuta o fragmento do `st.dialog`; confirma pela mesma função do botão.
+    sess.nova_sessao(conn_temporaria, sessao_demo, 'Dona Lúcia')
+    at = _app('Dona Lúcia')
+    assert 'pergunta da demo' not in '\n'.join(m.value for m in at.main.markdown)
+    assert any('Sessões anteriores' in m.value for m in at.sidebar.markdown)
+
+    at.chat_input[0].set_value('primeira da nova').run()
+    nova = agente_falso.chamadas[-1]
+    assert nova['sessao_id'] != sessao_demo
+    assert nova['historico'] == []
+    assert nova['requisicoes_na_sessao'] == 0
