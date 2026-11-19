@@ -92,6 +92,7 @@ NOMES_FERRAMENTAS_ESPERADAS = (
     'extrair_e_classificar_pedido',
     'consultar_dados',  # compatibilidade com testes e integrações legadas
     'buscar_produtores',
+    'listar_produtos_catalogo',
     'consultar_financeiro',
     'rastrear_lote',
     'consultar_preco',

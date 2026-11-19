@@ -7,6 +7,7 @@ from sabor.tools.consultar_dados import (
     consultar_financeiro,
     consultar_preco,
     consultar_safra,
+    listar_produtos_catalogo,
     rastrear_lote,
 )
 from sabor.tools.relatorios import gerar_relatorio
@@ -19,6 +20,7 @@ __all__ = [
     'consultar_financeiro',
     'consultar_preco',
     'consultar_safra',
+    'listar_produtos_catalogo',
     'extrair_e_classificar_pedido',
     'gerar_relatorio',
     'rastrear_lote',

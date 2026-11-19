@@ -32,6 +32,73 @@ _MESES_NOME = (
 )
 
 # =============================================================================
+# 0. listar_produtos_catalogo
+# =============================================================================
+
+
+class ProdutoCatalogo(BaseModel):
+    id: int
+    nome: str
+    unidade: str
+    categoria: str | None
+    origem_animal: bool
+
+
+class CatalogoProdutosResultado(BaseModel):
+    produtos: list[ProdutoCatalogo]
+    total: int
+    fonte: Fonte
+
+
+def listar_produtos_catalogo(
+    ctx: RunContext[AgentDeps],
+    *,
+    categoria: str | None = None,
+    termo: str | None = None,
+) -> CatalogoProdutosResultado:
+    """Lista o catálogo canônico diretamente da tabela `produtos`.
+
+    O catálogo mostra os produtos cadastrados, não estoque nem disponibilidade atual.
+    Para descobrir quais produtores fornecem um produto, use `buscar_produtores`.
+    """
+    condicoes: list[str] = []
+    parametros: list[str] = []
+
+    if categoria and categoria.strip():
+        condicoes.append('categoria ILIKE %s')
+        parametros.append(f'%{categoria.strip()}%')
+    if termo and termo.strip():
+        condicoes.append('nome ILIKE %s')
+        parametros.append(f'%{termo.strip()}%')
+
+    where_sql = f"WHERE {' AND '.join(condicoes)}" if condicoes else ''
+    linhas = ctx.deps.conn.execute(
+        f"""
+        SELECT id, nome, unidade, categoria, origem_animal
+        FROM produtos
+        {where_sql}
+        ORDER BY categoria NULLS LAST, nome
+        """,
+        parametros,
+    ).fetchall()
+    produtos = [
+        ProdutoCatalogo(
+            id=row[0],
+            nome=row[1],
+            unidade=row[2],
+            categoria=row[3],
+            origem_animal=bool(row[4]),
+        )
+        for row in linhas
+    ]
+    return CatalogoProdutosResultado(
+        produtos=produtos,
+        total=len(produtos),
+        fonte=Fonte(arquivo='produtos', referencia='catálogo canônico'),
+    )
+
+
+# =============================================================================
 # 1. buscar_produtores
 # =============================================================================
 

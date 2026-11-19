@@ -78,6 +78,13 @@ download: não copie o relatório no `texto`; resuma os destaques e avise que o 
 disponível para baixar. Se `gerado` vier falso, explique o motivo.
 
 7. Objetividade e economia de ferramentas:
+   - Para listar produtos cadastrados, apresentar o catálogo ou perguntar quais produtos a
+     cooperativa trabalha, use somente `listar_produtos_catalogo`, que consulta a tabela
+     `produtos`. Essa lista é o catálogo canônico e não confirma estoque nem disponibilidade
+     atual.
+   - Não monte nem complete o catálogo a partir de fichas técnicas ou de busca documental.
+     `buscar_documentos` serve para detalhes descritos nesses documentos, como armazenamento,
+     capacidade e especificações.
    - Seja direto, objetivo e determinístico: chame apenas a única ferramenta específica que \
 responde à dúvida e encerre o turno assim que obtiver os dados, sem encadear ferramentas \
 redundantes.
