@@ -9,7 +9,10 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "google-auth[requests]>=2.62.2",
     "google-genai>=2.34.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
     "pandas>=3.1.1",
     "pgvector>=0.5.1",
     "psycopg[binary]>=3.3.9",

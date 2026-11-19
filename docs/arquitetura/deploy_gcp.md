@@ -10,7 +10,7 @@ Seção de deploy do documento de arquitetura (#18). O diagrama *Visão geral* u
 | PostgreSQL + pgvector: tabelas operacionais, `chunks` (`vector(768)`, HNSW), cache `UNLOGGED`, sessões/mensagens e auditoria | container `db` (`pgvector/pgvector:pg17`) | **Cloud SQL for PostgreSQL 17** com a extensão `vector` |
 | LLM (Gemini 3.5 Flash-Lite + fallback OpenRouter) e embeddings (`gemini-embedding-001`) | Google AI Studio (`GEMINI_API_KEY`) | Google AI Studio ou **Vertex AI** |
 | Segredos (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, senha do banco) | `.env` (fora do git) | **Secret Manager**, injetado como variável de ambiente no Cloud Run |
-| Observabilidade (etapa 5c, #39) | Logfire | Logfire ou **Cloud Trace** (mesma instrumentação OpenTelemetry, muda o exportador) |
+| Observabilidade (etapa 5c, #39) | Desligada ou `OBSERVABILIDADE=console` | **Cloud Trace** pela Telemetry API (`OBSERVABILIDADE=gcp`), com os logs correlacionados no Cloud Logging |
 | Ingestão e carga (`init_db`, `etl`, `ingest_docs`, `triagem_lote`) | `scripts/` via `uv run` ou `docker compose run` | **Cloud Run Job** com a mesma imagem |
 | Imagem da aplicação | `docker compose build` | **Artifact Registry** (build com Cloud Build ou `docker push`) |
 
@@ -129,4 +129,4 @@ gcloud run deploy sabor-app \
 
 - **Cache `UNLOGGED`** (#36): no Cloud SQL a tabela continua sem WAL. Ela é esvaziada após crash ou failover e não vai para réplicas de leitura. Isso não é problema, porque o cache é descartável e a chave inclui a versão do dataset.
 - **Custos**: `db-g1-small` sem alta disponibilidade e Cloud Run com `min-instances=0` mantêm a demo barata, mas a primeira requisição tem cold start de alguns segundos. Para a apresentação ao vivo, `--min-instances=1` evita o cold start.
-- **Observabilidade** (#39): o PydanticAI emite OpenTelemetry. Com o Logfire basta o token como segredo. Com o Cloud Trace entra o exportador `opentelemetry-exporter-gcp-trace`, e a service account precisa de `roles/cloudtrace.agent`.
+- **Observabilidade** (#39): cada turno vira um trace no Cloud Trace, exportado por OTLP para a Telemetry API. Exige as APIs `telemetry.googleapis.com` e `cloudtrace.googleapis.com`, o papel `roles/telemetry.tracesWriter` na service account e `OBSERVABILIDADE=gcp` no serviço. A decisão em relação ao Logfire e os detalhes estão em [docs/dev/observabilidade.md](../dev/observabilidade.md).

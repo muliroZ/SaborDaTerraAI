@@ -3,10 +3,11 @@
 from collections.abc import Sequence
 
 from typing import Literal
-from uuid import uuid4
 from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 from pydantic_ai.messages import ModelRequestAttempt
+
+from sabor.observabilidade import trace_id_atual
 
 
 UserProfile = Literal["funcionario", "produtor"]
@@ -129,7 +130,8 @@ class RespostaTurno(BaseModel):
     ferramentas: list[str] = Field(default_factory=list)
     tokens_entrada: int | None = None
     tokens_saida: int | None = None
-    trace_id: str = Field(default_factory=lambda: str(uuid4()))
+    trace_id: str = Field(default_factory=trace_id_atual)
+    """Trace do turno no Cloud Trace (#39); UUID quando a observabilidade está desligada."""
     
     @classmethod
     def de_resposta_agente(
