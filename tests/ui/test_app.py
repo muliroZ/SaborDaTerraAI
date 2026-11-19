@@ -10,6 +10,8 @@ from streamlit.testing.v1 import AppTest
 import sabor.agent
 from sabor.agent import memoria as sess
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaTurno, RetornoAntecipado
+from sabor.tools.pedidos import modelo_extracao
+from sabor.triagem import hash_entrada
 
 UI = str(Path(__file__).resolve().parents[2] / 'src' / 'sabor' / 'ui' / 'app.py')
 
@@ -166,6 +168,52 @@ def test_trava_impede_dois_turnos_simultaneos_na_mesma_sessao(agente_falso):
     assert isinstance(trava, type(threading.Lock()))
 
 
+def _botao(at: AppTest, rotulo: str):
+    return next((b for b in at.button if b.label == rotulo), None)
+
+
+def test_caixa_de_entrada_so_para_a_equipe_e_ordenada_por_urgencia(agente_falso, conn_temporaria):
+    conn_temporaria.execute('TRUNCATE pedidos CASCADE')
+    conn_temporaria.execute(
+        """
+        INSERT INTO pedidos (id, data_recebimento, canal, mensagem_original) VALUES
+            ('PED-UI-1', '2026-10-28 09:00', 'email', 'cotação'),
+            ('PED-UI-2', '2026-10-28 10:00', 'whatsapp', 'notificação'),
+            ('PED-UI-3', '2026-10-28 11:00', 'email', 'falhou')
+        """
+    )
+    for pid, recebido_em, texto in conn_temporaria.execute(
+        'SELECT id, data_recebimento, mensagem_original FROM pedidos'
+    ).fetchall():
+        conn_temporaria.execute(
+            """
+            INSERT INTO triagem_pedidos (pedido_id, hash_entrada, status, tipo, urgencia,
+                                         resultado, sinalizacoes, erro)
+            SELECT %s, %s, v.status, v.tipo, v.urgencia, v.resultado::jsonb,
+                   v.sinalizacoes::text[], v.erro
+            FROM (VALUES
+                ('PED-UI-1', 'ok', 'cotacao', 'baixa', '{}', '{}', NULL),
+                ('PED-UI-2', 'ok', 'notificacao_oficial', 'critica', '{}', '{conformidade}', NULL),
+                ('PED-UI-3', 'erro', NULL, NULL, NULL, '{}', 'timeout')
+            ) AS v (pedido_id, status, tipo, urgencia, resultado, sinalizacoes, erro)
+            WHERE v.pedido_id = %s
+            """,
+            (pid, hash_entrada(texto, recebido_em, modelo_extracao()), pid),
+        )
+
+    assert _botao(_app('P003'), 'Caixa de entrada') is None  # produtor não vê pedidos
+
+    at = _app('Dona Lúcia')
+    _botao(at, 'Caixa de entrada').click().run()
+
+    assert not at.exception
+    tabela = at.dataframe[0].value
+    assert list(tabela['pedido_id']) == ['PED-UI-2', 'PED-UI-1', 'PED-UI-3']
+    assert list(tabela['urgencia']) == ['Crítica', 'Baixa', 'erro']
+    assert [m.value for m in at.metric] == ['1', '0', '0', '1']
+    assert '1 pedido(s) sem triagem' in at.warning[0].value
+
+
 # ---------------------------------------------------------------------------
 # executar_turno direto (sem AppTest): conexões e gravação pelo hook da etapa 5b
 # ---------------------------------------------------------------------------
@@ -238,4 +286,25 @@ def test_erro_inesperado_grava_falha_segura_uma_vez(app_modulo, conn_temporaria,
         app.MENSAGEM_FALHA_SEGURA,
         'pergunta 2',
         'ok',
+    ]
+
+
+def test_erro_psycopg_interno_no_turno_nao_mascara_como_falha_ao_gravar(
+    app_modulo, conn_temporaria, monkeypatch
+):
+    import psycopg
+
+    app, _ = app_modulo
+    sessao = sess.criar_sessao(conn_temporaria, 'P012')
+
+    def explode_conexao_interna(*args, **kwargs):
+        raise psycopg.OperationalError('the connection is closed')
+
+    monkeypatch.setattr(app, 'processar_turno', explode_conexao_interna)
+    turno = app.executar_turno(sessao.id, 'P012', 'pergunta com erro interno de banco')
+    assert turno.falha_segura is True
+    mensagens = sess.listar_mensagens(conn_temporaria, sessao.id)
+    assert [m.texto for m in mensagens] == [
+        'pergunta com erro interno de banco',
+        app.MENSAGEM_FALHA_SEGURA,
     ]

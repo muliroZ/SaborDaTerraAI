@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Literal
 import dateparser
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sabor.agent.deps import AgentDeps
 from sabor.tools.base import _resolver_produto_id
@@ -88,10 +90,14 @@ _NOMES_DIAS = (
 )
 
 
+def modelo_extracao() -> str:
+    """Modelo usado na extração de pedidos (`SABOR_PEDIDOS_MODEL`)."""
+    return os.getenv('SABOR_PEDIDOS_MODEL', 'google:gemini-3.5-flash-lite')
+
+
 def _agente_extracao() -> Agent[None, Pedido]:
     """Cria o agente de extração com o modelo configurado para o projeto."""
-    modelo = os.getenv('SABOR_PEDIDOS_MODEL', 'google:gemini-3.5-flash-lite')
-    return Agent(modelo, output_type=Pedido, deps_type=None)
+    return Agent(modelo_extracao(), output_type=Pedido, deps_type=None)
 
 
 def _normalizar(texto: str) -> str:
@@ -174,37 +180,61 @@ async def extrair_e_classificar_pedido(
     texto: str | None = None,
 ) -> Pedido:
     """Extrai dados de um pedido salvo ou de texto colado."""
+    return await extrair_e_classificar(ctx.deps, pedido_id=pedido_id, texto=texto)
+
+
+@dataclass(frozen=True)
+class MensagemPedido:
+    """Mensagem a extrair e a data que ancora as datas relativas dela."""
+
+    texto: str
+    data_referencia: date
+    pedido_id: str | None = None
+
+
+def carregar_mensagem(
+    deps: AgentDeps, *, pedido_id: str | None = None, texto: str | None = None
+) -> MensagemPedido:
+    """Pedido salvo (datas relativas ao recebimento) ou texto colado (data de referência)."""
     if bool(pedido_id) == bool(texto):
         raise ValueError('Informe exatamente um entre pedido_id e texto.')
+    if not pedido_id:
+        return MensagemPedido(texto=texto or '', data_referencia=deps.data_referencia)
 
-    recebido_em: datetime | None = None
-    id_resolvido: str | None = None
-
-    if pedido_id:
-        row = ctx.deps.conn.execute(
-            """
-            SELECT id, data_recebimento, mensagem_original
-            FROM pedidos
-            WHERE id = %s
-            """,
-            (pedido_id.strip(),),
-        ).fetchone()
-
-        if row is None:
-            raise ValueError(f'Pedido não encontrado: {pedido_id}')
-
-        id_resolvido, recebido_em, texto = row
-
-    mensagem_original = texto or ''
-    data_referencia = (
-        recebido_em.date()
-        if recebido_em is not None
-        else ctx.deps.data_referencia
+    row = deps.conn.execute(
+        """
+        SELECT id, data_recebimento, mensagem_original
+        FROM pedidos
+        WHERE id = %s
+        """,
+        (pedido_id.strip(),),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f'Pedido não encontrado: {pedido_id}')
+    id_resolvido, recebido_em, mensagem_original = row
+    return MensagemPedido(
+        texto=mensagem_original or '',
+        data_referencia=recebido_em.date(),
+        pedido_id=id_resolvido,
     )
-    mensagem_mascarada = ctx.deps.mascarador.mascarar(mensagem_original)
+
+
+async def extrair_pedido(
+    deps: AgentDeps,
+    mensagem: MensagemPedido,
+    *,
+    usage: RunUsage | None = None,
+    usage_limits: UsageLimits | None = None,
+) -> Pedido:
+    """Etapa do LLM (#9): extração bruta, antes do catálogo e das regras.
+
+    `usage` acumula o consumo da chamada ao modelo e `usage_limits` aplica o orçamento
+    de tokens (#32); sem eles, a chamada é a mesma do chat.
+    """
+    mensagem_mascarada = deps.mascarador.mascarar(mensagem.texto)
 
     instrucao = (
-        f'Extraia os dados sem inventar valores. Data de referência: {data_referencia}. '
+        f'Extraia os dados sem inventar valores. Data de referência: {mensagem.data_referencia}. '
         'Resolva datas relativas usando essa referência. Extraia em entrega.data_texto '
         'a expressão original da data e preserve o dia da semana mencionado. Se a data '
         'e o dia da semana forem incompatíveis, deixe entrega.data nula. Preserve itens '
@@ -213,33 +243,63 @@ async def extrair_e_classificar_pedido(
         'bancários no resultado.'
     )
 
+    orcamento = {
+        chave: valor
+        for chave, valor in (('usage', usage), ('usage_limits', usage_limits))
+        if valor is not None
+    }
     resposta = await _agente_extracao().run(
         f'{instrucao}\n\nMensagem:\n{mensagem_mascarada}',
+        **orcamento,
     )
     pedido = resposta.output
-    pedido.pedido_id = id_resolvido
+    pedido.pedido_id = mensagem.pedido_id
+    return pedido
+
+
+def classificar_extracao(deps: AgentDeps, mensagem: MensagemPedido, extracao: Pedido) -> Pedido:
+    """Etapa determinística, sem LLM: catálogo, datas e regras (#10) sobre o banco atual.
+
+    Trabalha numa cópia: a mesma extração pode ser reclassificada quando o banco mudar
+    (triagem em lote, #14).
+    """
+    pedido = extracao.model_copy(deep=True)
 
     for item in pedido.itens:
         if item.produto is None:
             item.produto = item.produto_texto
 
-        produto_id = _resolver_produto_id(ctx.deps.conn, item.produto)
+        produto_id = _resolver_produto_id(deps.conn, item.produto)
         if produto_id is not None:
-            row = ctx.deps.conn.execute(
+            row = deps.conn.execute(
                 'SELECT nome FROM produtos WHERE id = %s',
                 (produto_id,),
             ).fetchone()
             if row:
                 item.produto = row[0]
 
-    _validar_dia_e_data(pedido, mensagem_original, data_referencia)
+    _validar_dia_e_data(pedido, mensagem.texto, mensagem.data_referencia)
 
     classificar_pedido(
         pedido,
-        conn=ctx.deps.conn,
-        mensagem_original=mensagem_original,
-        data_referencia=data_referencia,
-        data_global=ctx.deps.data_referencia,
+        conn=deps.conn,
+        mensagem_original=mensagem.texto,
+        data_referencia=mensagem.data_referencia,
+        data_global=deps.data_referencia,
     )
 
     return pedido
+
+
+async def extrair_e_classificar(
+    deps: AgentDeps,
+    *,
+    pedido_id: str | None = None,
+    texto: str | None = None,
+    usage: RunUsage | None = None,
+    usage_limits: UsageLimits | None = None,
+) -> Pedido:
+    """Núcleo da tool, chamável fora do turno: extração pelo LLM seguida das regras."""
+    mensagem = carregar_mensagem(deps, pedido_id=pedido_id, texto=texto)
+    extracao = await extrair_pedido(deps, mensagem, usage=usage, usage_limits=usage_limits)
+    return classificar_extracao(deps, mensagem, extracao)

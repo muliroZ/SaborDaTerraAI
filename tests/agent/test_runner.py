@@ -354,6 +354,15 @@ def test_turno_conclui_e_fecha_a_conexao_propria(monkeypatch):
 
     conn = _ConexaoFalsa()
     monkeypatch.setattr(runner, 'conectar_readonly', lambda: conn)
+    estado_no_guardrail: list[list[str]] = []
+    guardrail_original = runner.processar_guardrail_saida
+
+    def spy_guardrail(resposta, **kwargs):
+        # Na Etapa 4, `conn_propria` precisa ainda estar aberta (não fechada antes do guardrail).
+        estado_no_guardrail.append(list(kwargs['conn'].eventos))
+        return guardrail_original(resposta, **kwargs)
+
+    monkeypatch.setattr(runner, 'processar_guardrail_saida', spy_guardrail)
 
     def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args={'texto': 'ok'})])
@@ -367,7 +376,59 @@ def test_turno_conclui_e_fecha_a_conexao_propria(monkeypatch):
 
     assert turno.falha_segura is False
     assert turno.texto == 'ok'
+    assert estado_no_guardrail == [[]]
     assert conn.eventos == ['close']
+
+
+def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao(monkeypatch):
+    """Regressão: com `deps=None` (como na UI), a conexão própria segue aberta até a Etapa 4
+    para o guardrail de saída consultar o banco, e é fechada logo depois."""
+    import psycopg
+    import pytest
+
+    import sabor.agent.runner as runner
+    from sabor.db import conectar_readonly
+
+    try:
+        conectar_readonly(tentativas=1).close()
+    except psycopg.OperationalError:
+        pytest.skip('Postgres indisponível (rode `docker compose up -d`)')
+
+    conexoes: list[psycopg.Connection] = []
+
+    def _abrir():
+        conn = conectar_readonly(tentativas=1)
+        conexoes.append(conn)
+        return conn
+
+    monkeypatch.setattr(runner, 'conectar_readonly', _abrir)
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'O preço vigente do queijo coalho é R$ 38,00.',
+                        'fontes': [
+                            {'arquivo': 'tabela_precos_outubro_2026.csv', 'referencia': 'Queijo'}
+                        ],
+                    },
+                )
+            ]
+        )
+
+    turno = processar_turno(
+        'sess-pg-guardrail',
+        'Qual o preço do queijo coalho?',
+        agente=criar_agente([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)], tools=[]),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.texto == 'O preço vigente do queijo coalho é R$ 38,00.'
+    assert len(turno.fontes) == 1
+    assert len(conexoes) == 1 and conexoes[0].closed
 
 
 def test_timeouts_configuraveis_pelo_ambiente(monkeypatch):

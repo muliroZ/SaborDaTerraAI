@@ -15,3 +15,8 @@ Esta pasta concentra a documentação técnica de desenvolvimento, arquitetura i
   - Categorias de tokens (`[CPF_1]`, `[RG_1]`, `[TEL_1]`, `[EMAIL_1]`, `[PIX_1]`, `[BANCO_1]`, `[AGENCIA_1]`, `[CONTA_1]`)
   - Mascaramento da mensagem do usuário (`PED-2026-013`, `PED-2026-015`) e dos retornos das ferramentas (`#7`, `#8`)
   - Regra LGPD na Etapa 4c (restauração exclusiva em `texto` para o operador; proteção total em `rascunhos`)
+
+- **[Triagem em Lote da Caixa de Entrada (#14)](triagem_lote.md)**
+  - Job fora do chat sobre a tabela `pedidos` (pipelines de ingestão em JSON), gravando em `triagem_pedidos`
+  - Reaproveitamento por `hash_entrada`, orçamento de tokens por pedido e por lote (#32) e novas tentativas com espera
+  - Fila ordenada por urgência, exportação CSV/JSON e "Caixa de entrada" na interface

@@ -31,6 +31,10 @@ PRODUTORES_IDS = tuple(f'P{n:03d}' for n in range(1, 19))
 USUARIOS_SIMULADOS = FUNCIONARIOS + PRODUTORES_IDS
 
 
+ROTULOS_URGENCIA = {'critica': 'Crítica', 'alta': 'Alta', 'normal': 'Normal', 'baixa': 'Baixa'}
+"""Rótulos da urgência da triagem (#10, #14)."""
+
+
 def eh_produtor(usuario_id: str) -> bool:
     return _resolver_usuario(usuario_id).perfil == 'produtor'
 

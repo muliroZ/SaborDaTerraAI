@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import inspect
 import logging
 import re
+import threading
 import time
 from types import ModuleType
 from typing import Any
@@ -23,7 +24,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from sabor import tools as modulo_tools
-from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
+from sabor.agent.deps import AgentDeps, obter_data_referencia
 from sabor.agent.fallback import (
     construir_capability_fallback,
     extrair_metadados_resposta,
@@ -227,13 +228,40 @@ def _executar_com_prazo(
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sabor-turno')
     futuro: Future[Any] = executor.submit(lambda: asyncio.run(_rodar()))
+    abandonado = False
+    fechar_lock = threading.Lock()
+    fechado = False
+
+    def _fechar_uma_vez() -> None:
+        nonlocal fechado
+        with fechar_lock:
+            if fechado:
+                return
+            fechado = True
+        _fechar_quando_livre(conn_propria)
+
     if conn_propria is not None:
-        futuro.add_done_callback(lambda _f: _fechar_quando_livre(conn_propria))
+
+        def _ao_terminar(f: Future[Any]) -> None:
+            # No caminho de sucesso o turno ainda usa `conn_propria` na Etapa 4 (guardrail de saída)
+            # e a fecha lá. Em erro/cancelamento/timeout, fecha aqui em segundo plano quando livre.
+            if abandonado or f.cancelled() or f.exception() is not None:
+                _fechar_uma_vez()
+
+        futuro.add_done_callback(_ao_terminar)
+
     try:
         return futuro.result(timeout=prazo_s + FOLGA_ENCERRAMENTO_S)
     except TimeoutError:
+        abandonado = True
         if conn_propria is not None:
             _cancelar_consulta_em_andamento(conn_propria)
+            if futuro.done():
+                threading.Thread(
+                    target=_fechar_uma_vez,
+                    name='sabor-fechar-conn',
+                    daemon=True,
+                ).start()
         raise
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -260,30 +288,10 @@ def processar_turno(
     guardrail_entrada: Callable[[str], RetornoAntecipado | str | None] | None = None,  # Etapa 2
     pos_processar: Callable[[RespostaAgente], RespostaAgente] | None = None,  # Etapa 4
     registrar_auditoria: Callable[[RespostaTurno], None] | None = None,  # Etapa 5a (#35)
-    salvar_memoria: Callable[..., None] | None = None,  # Etapa 5b (#31)
+    salvar_memoria: Callable[[str, str, RespostaTurno], None] | None = None,  # Etapa 5b (#31)
 ) -> RespostaTurno:
     """Executa o turno completo do diagrama Agent System (etapas 1 a 5) com retornos antecipados."""
     inicio = time.perf_counter()
-
-    def _salvar_turno(turno: RespostaTurno, historico_modelo_json: str | None = None) -> None:
-        if salvar_memoria is None:
-            return
-        try:
-            assinatura = inspect.signature(salvar_memoria)
-            aceita_historico = (
-                'historico_modelo_json' in assinatura.parameters
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD
-                       for p in assinatura.parameters.values())
-            )
-        except (TypeError, ValueError):
-            aceita_historico = False
-        if aceita_historico:
-            salvar_memoria(
-                sessao_id, mensagem.strip(), turno,
-                historico_modelo_json=historico_modelo_json,
-            )
-        else:
-            salvar_memoria(sessao_id, mensagem.strip(), turno)
 
     # -----------------------------------------------------------------------
     # Etapa 1: Carregar memória da sessão (Issue #31)
@@ -313,7 +321,7 @@ def processar_turno(
                 mensagem=resultado_hook,
             )
     else:
-        dataset_ver = (deps.dataset_version if deps is not None else None) or 'v1'
+        dataset_ver = deps.dataset_version if deps is not None else 'v1'
         contagem_sessao = (
             requisicoes_na_sessao
             if requisicoes_na_sessao is not None
@@ -340,7 +348,8 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_antecipado)
-        _salvar_turno(turno_antecipado)
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_antecipado)
         return turno_antecipado
 
     # -----------------------------------------------------------------------
@@ -349,27 +358,30 @@ def processar_turno(
     agente_exec = agente if agente is not None else criar_agente()
     prazo_turno_s = timeout_turno_s if timeout_turno_s is not None else obter_timeout_turno()
     limites_exec = usage_limits if usage_limits is not None else obter_usage_limits_turno()
-    # Não consulta o banco para entradas vazias/barradas. Nas mensagens aceitas, calcula o
-    # fingerprint uma vez e reutiliza a conexão readonly durante a chamada do agente.
+    # Conexão aberta pelo turno: em erro/timeout, `_executar_com_prazo` agenda o fechamento;
+    # no caminho normal, fica aberta até o fim da Etapa 4 (guardrail de saída) e fecha no finally.
+    # Com `deps` do chamador, a conexão é dele.
     conn_propria = conectar_readonly() if deps is None else None
+
     try:
-        deps_exec = deps or AgentDeps(
-            conn=conn_propria,
-            data_referencia=obter_data_referencia(),
-            usuario=usuario,
-            dataset_version=obter_versao_dataset(conn_propria),
-            mascarador=Mascarador(),
+        deps_exec = (
+            deps
+            if deps is not None
+            else AgentDeps(
+                conn=conn_propria,
+                data_referencia=obter_data_referencia(),
+                usuario=usuario,
+                mascarador=Mascarador(),
+            )
         )
-        if deps is not None and not deps.dataset_version:
-            deps_exec.dataset_version = obter_versao_dataset(deps.conn)
+        mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
+        mensagem_para_llm = (
+            mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
+        )
     except BaseException:
         if conn_propria is not None:
             _fechar_quando_livre(conn_propria)
         raise
-    mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
-    mensagem_para_llm = (
-        mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
-    )
 
     tentativas_erro: list[TentativaFallback] = []
     try:
@@ -384,8 +396,14 @@ def processar_turno(
             message_history=historico,
             usage_limits=limites_exec,
         )
-    except UsageLimitExceeded:
+    except UsageLimitExceeded as exc:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        logger.warning(
+            'Orçamento do turno esgotado (sessao=%s, latencia_ms=%s): %s',
+            sessao_id,
+            latencia_ms,
+            exc,
+        )
         retorno_orcamento = criar_retorno_orcamento_turno()
         turno_orcamento = RespostaTurno(
             sessao_id=sessao_id,
@@ -397,7 +415,8 @@ def processar_turno(
         )
         if registrar_auditoria is not None:
             registrar_auditoria(turno_orcamento)
-        _salvar_turno(turno_orcamento)
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_orcamento)
         return turno_orcamento
     except (
         TimeoutError,
@@ -421,25 +440,36 @@ def processar_turno(
             registrar_auditoria(turno_falha)
         # Grava também a falha segura para o histórico exibido ficar coerente; a memória
         # (#31) não a repassa ao modelo nos turnos seguintes.
-        _salvar_turno(turno_falha)
+        if salvar_memoria is not None:
+            salvar_memoria(sessao_id, mensagem_limpa, turno_falha)
         return turno_falha
 
     # -----------------------------------------------------------------------
     # Etapa 4: Pós-processamento e restauração de PII para o operador (#33)
     # -----------------------------------------------------------------------
-    resposta_final = _restaurar_pii_resposta(resultado.output, deps_exec.mascarador)
-    
-    # Guardrail de saída aqui!
-    fontes_turno = [f"{f.arquivo} · {f.referencia}" for f in resposta_final.fontes]
-    resposta_final, _regras_saida = processar_guardrail_saida(
-        resposta_final,
-        conn=deps_exec.conn,
-        data_referencia=deps_exec.data_referencia,
-        fontes_retornadas_no_turno=fontes_turno,
-    )
+    try:
+        resposta_final = _restaurar_pii_resposta(resultado.output, deps_exec.mascarador)
 
-    if pos_processar is not None:
-        resposta_final = pos_processar(resposta_final)
+        # Limpa eventual transação abortada antes das consultas read-only do guardrail de saída.
+        if conn_propria is not None:
+            info_conn = getattr(conn_propria, 'info', None)
+            if getattr(info_conn, 'transaction_status', None) == 3:  # PQTRANS_INERROR
+                conn_propria.rollback()
+
+        # Guardrail de saída aqui!
+        fontes_turno = [f'{f.arquivo} · {f.referencia}' for f in resposta_final.fontes]
+        resposta_final, _regras_saida = processar_guardrail_saida(
+            resposta_final,
+            conn=deps_exec.conn,
+            data_referencia=deps_exec.data_referencia,
+            fontes_retornadas_no_turno=fontes_turno,
+        )
+
+        if pos_processar is not None:
+            resposta_final = pos_processar(resposta_final)
+    finally:
+        if conn_propria is not None:
+            _fechar_quando_livre(conn_propria)
 
     # -----------------------------------------------------------------------
     # Etapa 5: Auditoria (#35) e persistência de memória da sessão (#31)
@@ -448,6 +478,19 @@ def processar_turno(
         resultado.new_messages()
     )
     latencia_ms = int((time.perf_counter() - inicio) * 1000)
+    uso = getattr(resultado, 'usage', None)
+    if uso is not None:
+        logger.info(
+            'Turno concluído (sessao=%s, modelo=%s, chamadas=%s, tokens_in=%s, '
+            'tokens_out=%s, tokens_total=%s, latencia_ms=%s)',
+            sessao_id,
+            modelo_efetivo,
+            getattr(uso, 'requests', None),
+            getattr(uso, 'input_tokens', None),
+            getattr(uso, 'output_tokens', None),
+            getattr(uso, 'total_tokens', None),
+            latencia_ms,
+        )
     turno = RespostaTurno.de_resposta_agente(
         sessao_id=sessao_id,
         usuario=usuario,
@@ -460,13 +503,7 @@ def processar_turno(
 
     if registrar_auditoria is not None:
         registrar_auditoria(turno)
-    historico_modelo_json = resultado.new_messages_json()
-    if isinstance(historico_modelo_json, bytes):
-        historico_modelo_json = historico_modelo_json.decode('utf-8')
-    if callable(mascarar_fn):
-        # A serialização contém prompts e resultados de tools; aplique a mesma proteção
-        # antes de persistir o histórico completo no banco.
-        historico_modelo_json = mascarar_fn(historico_modelo_json)
-    _salvar_turno(turno, historico_modelo_json)
+    if salvar_memoria is not None:
+        salvar_memoria(sessao_id, mensagem_limpa, turno)
 
     return turno
