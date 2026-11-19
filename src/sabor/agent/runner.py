@@ -30,11 +30,12 @@ from sabor.agent.fallback import (
     extrair_tentativas_de_excecao,
     ler_segundos_env,
 )
-from sabor.agent.guardrails import (
+from sabor.agent.guardrail_entry import (
     criar_retorno_orcamento_turno,
     executar_guardrail_entrada,
     obter_usage_limits_turno,
 )
+from sabor.agent.guardrail_exit import processar_guardrail_saida
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
@@ -427,6 +428,16 @@ def processar_turno(
     # Etapa 4: Pós-processamento e restauração de PII para o operador (#33)
     # -----------------------------------------------------------------------
     resposta_final = _restaurar_pii_resposta(resultado.output, deps_exec.mascarador)
+    
+    # Guardrail de saída aqui!
+    fontes_turno = [f"{f.arquivo} · {f.referencia}" for f in resposta_final.fontes]
+    resposta_final, _regras_saida = processar_guardrail_saida(
+        resposta_final,
+        conn=deps_exec.conn,
+        data_referencia=deps_exec.data_referencia,
+        fontes_retornadas_no_turno=fontes_turno,
+    )
+
     if pos_processar is not None:
         resposta_final = pos_processar(resposta_final)
 

@@ -5,7 +5,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import UsageLimits
 
 from sabor.agent.deps import AgentDeps
-from sabor.agent.guardrails import (
+from sabor.agent.guardrail_entry import (
     executar_guardrail_entrada,
     verificar_cota_sessao,
 )
