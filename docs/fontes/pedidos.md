@@ -44,7 +44,7 @@ Para cada mensagem: o que pede, quais fontes consultar e o que pode dar errado.
 
 ### PED-2026-001 — Restaurante Raízes · e-mail · compra
 - **Itens:** queijo coalho 30 kg, manteiga de garrafa 10 kg, mel silvestre 5 kg, coentro 20 maços, cebolinha 10 maços e, opcionalmente, ricota 5 kg.
-- **Entrega:** "sexta (01/nov)". ⚠️ **01/11/2026 é domingo**; a sexta mais próxima é 31/10. **Confirme a data.**
+- **Entrega:** "sexta (01/nov)". ⚠️ **01/11/2026 é domingo**; a sexta mais próxima é 30/10. **Confirme a data.**
 - **Contexto:** contrato 008/2026 com PIX no ato e entrega até 10h. O restaurante prefere orgânico, o que aponta para queijo e manteiga de P007. Ricota só P003 produz. "Carlos" é o chef e proprietário Carlos Eduardo Ramos.
 - **Fontes:** [contratos](contratos.md), [tabela_precos](tabela_precos.md), [fichas_tecnicas](fichas_tecnicas.md).
 
@@ -162,7 +162,7 @@ O enunciado do projeto ([projeto.md](../projeto.md#41-interpretação-e-triagem-
 | Urgência | Critério | Pedidos |
 |---|---|---|
 | 🔴 **Crítica** | Prazo ≤ 48 h, risco regulatório ou estoque perecível parado | 014 (ADAGRO, risco ao SIE), 006 (pedido para "hoje"), 003 (pedido para "amanhã"), 015 (200 kg de queijo esperando resposta até 31/10) |
-| 🟠 **Alta** | Entrega com data marcada nos próximos 7 dias | 001 (31/10 ou 01/11?), 005 (31/10), 002 (03 ou 04/11?), 004 (04–08/11), 007 (evento em 08/11, depende de cotação) |
+| 🟠 **Alta** | Entrega com data marcada nos próximos 7 dias | 001 (30/10 ou 01/11?), 005 (31/10), 002 (03 ou 04/11?), 004 (04–08/11), 007 (evento em 08/11, depende de cotação) |
 | 🟡 **Normal** | Cotação ou consulta sem data imediata | 008, 009, 010, 012 |
 | 🟢 **Baixa** | Prospecção ou entrega distante | 011 (exportação), 013 (janeiro/2027) |
 
@@ -197,7 +197,7 @@ Exemplo de extração para PED-2026-001, que o assistente pode gerar e a equipe 
   "urgencia": "alta",
   "comprador": {"nome": "Restaurante Raízes", "contrato": "008/2026", "contato": "Carlos"},
   "entrega": {"data": null, "data_texto": "sexta (01/nov)", "janela": "até 10h",
-              "alerta": "01/11/2026 é domingo — confirmar 31/10 (sexta)"},
+              "alerta": "01/11/2026 é domingo — confirmar 30/10 (sexta)"},
   "itens": [
     {"produto": "queijo coalho", "qtd": 30, "unidade": "kg", "preferencia": "orgânico",
      "produtores_elegiveis": ["P007", "P003"]},

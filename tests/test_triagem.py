@@ -33,7 +33,7 @@ EXTRACOES = {
     'COMPRA': {
         'tipo': 'compra',
         'comprador': {'nome': 'Mercado Bom Preço'},
-        'entrega': {'data': '2026-11-03'},
+        'entrega': {'data_texto': 'terça 03/11'},
         'itens': [{'produto_texto': 'mel', 'quantidade': 10, 'unidade': 'kg'}],
     },
 }

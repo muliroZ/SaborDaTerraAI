@@ -33,4 +33,3 @@ pedidos ──► triar_lote ──► extrair_e_classificar (LLM #9 + regras #1
 ## Limitações
 
 - O lote é sequencial: com o limite de 15 chamadas/min do plano gratuito, 100 pedidos levam alguns minutos. Paralelizar só compensa num plano pago.
-- O modelo às vezes coloca texto livre em `sinalizacoes` além das sinalizações das regras (comportamento da extração, #9).

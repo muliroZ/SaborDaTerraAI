@@ -15,7 +15,9 @@ class EtlProdutoSinonimos(Etl):
     def transform(self):
         self.info(f"-- Transform: {self.table}")
         
-        # Mapeamento exigido pela tabela_precos.md
+        # Mapeamento exigido pela tabela_precos.md. Só nomes que apontam para um único
+        # produto: "queijo", "mel variado" e "o mais artesanal" ficam de fora porque a extração
+        # de pedidos (#9) deve marcá-los como ambíguos, não adivinhar.
         sinonimos = [
             {'nome': 'goiaba', 'sinonimo': 'goiaba paluma'},
             {'nome': 'goiaba', 'sinonimo': 'goiaba paluma extra'},
@@ -27,13 +29,10 @@ class EtlProdutoSinonimos(Etl):
             {'nome': 'maracujá', 'sinonimo': 'passion fruit'},
             {'nome': 'tomate', 'sinonimo': 'tomate santa cruz'},
             {'nome': 'mel silvestre', 'sinonimo': 'mel puro'},
-            {'nome': 'mel silvestre', 'sinonimo': 'mel variado'},
             {'nome': 'mel de abelha jandaíra', 'sinonimo': 'mel de jandaíra'},
             {'nome': 'pimentão', 'sinonimo': 'pimentão verde'},
             {'nome': 'pimentão', 'sinonimo': 'pimentão colorido'},
             {'nome': 'tapioca', 'sinonimo': 'tapioca/goma'},
-            {'nome': 'queijo coalho', 'sinonimo': 'queijo'},
-            {'nome': 'queijo coalho', 'sinonimo': 'o mais artesanal'},
             {'nome': 'maracujá', 'sinonimo': 'maracuja'},
             {'nome': 'rúcula', 'sinonimo': 'rucula'},
             {'nome': 'mel silvestre', 'sinonimo': 'mel'},   
