@@ -1191,31 +1191,29 @@ def gerar_relatorio(
         TipoRelatorio,
         Field(
             description=(
-                'Uso exclusivo quando o usuário pedir explicitamente um relatório, levantamento '
-                'para download ou dossiê da ADAGRO: '
-                "'contas_a_receber' (relatório consolidado de vencidos × a vencer), "
-                "'organicos_vigentes' (relatório de produtores com orgânico vigente) ou "
-                "'dossie_adagro' (dossiê da inspeção da ADAGRO no PED-2026-014)."
+                "'contas_a_receber' (vencidos × a vencer por comprador), "
+                "'organicos_vigentes' (produtores com orgânico vigente, por produto) ou "
+                "'dossie_adagro' (o que a ADAGRO pediu no PED-2026-014, o que existe e "
+                'o que falta).'
             )
         ),
     ],
 ) -> RelatorioResultado:
-    """Gera relatório em Markdown para download (apenas sob pedido explícito de relatório/dossiê).
+    """Gera um relatório em Markdown para download e devolve só os destaques.
 
     QUANDO USAR:
-    - Somente quando o usuário pedir explicitamente um relatório, levantamento, planilha ou dossiê
-      para baixar: contas a receber / inadimplência por comprador; produtores ou produtos orgânicos
+    - Quando o usuário pedir um relatório, levantamento, planilha ou dossiê para baixar:
+      contas a receber / inadimplência por comprador; produtores ou produtos orgânicos
       certificados vigentes; dossiê, checklist ou documentação para a inspeção da ADAGRO.
 
     QUANDO NÃO USAR:
-    - Perguntas diretas ou pontuais (ex.: "Quem a SuperBom está devendo e há quanto tempo?" ou
-      "quanto a SuperBom deve?"): NÃO chame esta ferramenta; use `consultar_financeiro`.
-    - Perguntas diretas sobre produtores orgânicos (ex.: "Quais produtores têm certificação
-      orgânica vigente para mel?"): use `buscar_produtores`.
+    - Perguntas pontuais (ex.: "quanto a SuperBom deve?"): use `consultar_financeiro`.
     - Resumo de um produtor específico: use `resumir_produtor`.
 
     O arquivo completo é anexado automaticamente à resposta para download. Não copie o
     relatório no texto: resuma os destaques e diga que o arquivo está disponível para baixar.
+    Cada destaque já traz as fontes do próprio número entre colchetes: cite exatamente essas,
+    junto do número a que se referem, sem trocar nem inventar referências.
     """
     try:
         relatorio, destaques = _MONTADORES[tipo](ctx)
