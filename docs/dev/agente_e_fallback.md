@@ -27,8 +27,7 @@ src/sabor/
 ├── db.py                    # Adicionada role sabor_ro e função conectar_readonly()
 ├── ui/                      # Interface Streamlit (#13)
 │   ├── app.py               # App: chat, trava de turno, seletor de usuário, fontes, flags, rascunhos e nova sessão
-│   ├── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
-│   └── relatorio.py         # Relatório Markdown somente leitura da conversa, sem LLM (#38)
+│   └── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
 │   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido, resumir_produtor e gerar_relatorio
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
@@ -51,6 +50,7 @@ src/sabor/
     ├── cache.py             # Cache de respostas estáticas em tabela UNLOGGED: chave, elegibilidade e CacheRespostas (2b/5b, #36)
     ├── prompts.py           # SYSTEM_PROMPT_BASE alinhado aos 15 pedidos do case e contexto dinâmico (Etapa 3.1)
     ├── memoria.py           # Sessões e mensagens no PostgreSQL + message_history da sessão (camada mínima de #31)
+    ├── relatorio_conversa.py # Relatório Markdown somente leitura da sessão (mensagens + auditoria), sem LLM (#38)
     └── runner.py            # Fábrica criar_agente(), descoberta dinâmica de tools e processar_turno() (Etapas 1 a 5)
 
 tests/
@@ -58,8 +58,7 @@ tests/
 ├── test_schema.py           # Testes da role sabor_ro e bloqueio de INSERT/UPDATE/DELETE/DROP
 ├── ui/
 │   ├── test_app.py          # Interface com AppTest e agente simulado: turno, persistência, memória, trava (#13)
-│   ├── test_apresentacao.py # Destaques de retorno antecipado, badges de flags e trecho/RBAC das fontes (#13)
-│   └── test_relatorio.py    # Relatório da conversa (#38)
+│   └── test_apresentacao.py # Destaques de retorno antecipado, badges de flags e trecho/RBAC das fontes (#13)
 ├── agent/
 │   ├── test_schemas.py      # Testes de Fonte, Flag, Rascunho, RespostaAgente e RespostaTurno
 │   ├── test_deps.py         # Testes de AgentDeps, DATA_REF_DATE e MascaradorNoOp
@@ -67,6 +66,7 @@ tests/
 │   ├── test_fallback.py     # Testes de ModelFallback, gatilhos, não-gatilhos, tools e output_type (#37)
 │   ├── test_prompts_tools.py # Testes do system prompt, contexto dinâmico e descoberta snake_case de tools
 │   ├── test_memoria.py      # Sessão ativa, memória dos últimos N turnos, isolamento por "Nova sessão" (#31)
+│   ├── test_relatorio_conversa.py # Relatório da conversa: conteúdo, auditoria, PII por perfil e critério de aceite (#38)
 │   ├── test_cache.py        # Cache de respostas: chave, elegibilidade, critério de aceite e tabela UNLOGGED (#36)
 │   └── test_runner.py       # Testes ponta a ponta do processar_turno (etapas 1 a 5, guardrail e falha segura de 20s)
 └── tools/
@@ -230,7 +230,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Como o arquivo chega à UI:** a tool monta o Markdown sem LLM, guarda em `ctx.deps.relatorios` e devolve ao modelo só `destaques` (cada um com as próprias fontes). Na Etapa 4 o runner **sempre sobrescreve** `RespostaAgente.relatorios` com o que as tools geraram (um valor enviado pelo modelo no `final_result` é descartado), passando o Markdown pelo mascarador (sem restaurar, como os rascunhos) antes do guardrail de saída e do `pos_processar`. O guardrail de saída avalia o texto do modelo e não remove os relatórios, montados sem LLM; daí seguem em `RespostaTurno.relatorios` para auditoria, memória (só o texto entra no contexto) e para a UI, que mostra o botão de download e a pré-visualização.
 - **Guardrails:** o pedido passa pelo guardrail de entrada e pelos `UsageLimits` como qualquer turno; as consultas herdam o filtro por perfil e o mascaramento das tools `#7`/`#8`. - **Ausência documental:** só é afirmada pelo **inventário do acervo** (`listar_documentos`, tabela `documentos`, com o filtro por perfil); uma busca sem resultado nunca vira "não existe". Documento no inventário cujo trecho não foi lido aparece como "não foi possível confirmar" (lista de produtos do certificado, data do laudo, contratante do contrato). Com a busca fora do ar, a existência vem do inventário e o que depende do texto fica a confirmar.
 - **Apoio:** `listar_lotes` (em `consultar_dados.py`) e `listar_documentos` (em `documentos.py`), não exportadas como tools, e `ProdutorResultado.produtos_origem_animal`.
-- **Não confundir** com o relatório da conversa (`#38`, `relatorio.py`), que agora apenas lista os relatórios gerados em cada turno.
+- **Não confundir** com o relatório da conversa (`#38`, `agent/relatorio_conversa.py`), que agora apenas lista os relatórios gerados em cada turno.
 ### -----------------------------------------------------------------------------------------
 ---
 
@@ -284,6 +284,16 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 
 ---
 
+### 🗂️ Issue `#38` — Relatório Somente Leitura da Conversa ao Iniciar Nova Sessão
+- **Backend isolado** em [`src/sabor/agent/relatorio_conversa.py`](../../src/sabor/agent/relatorio_conversa.py), sem Streamlit e sem LLM: `relatorio_da_sessao(conn, sessao_id)` lê `mensagens` (`#31`) e `auditoria_mensagens` (`#35`, por `message_id`) e devolve `(nome_do_arquivo, markdown)`. Só faz `SELECT`; nada é gravado.
+- **Conteúdo determinístico:** cabeçalho (usuário, perfil, início/encerramento, data de referência, sessão), resumo (perguntas, fontes distintas, sinalizações, rascunhos, relatórios gerados, respostas do cache, retornos antecipados/falhas seguras, tokens e ferramentas usadas) e um bloco por turno com pergunta, resposta, fontes, flags, relatórios gerados (`#15`), rascunhos e a rastreabilidade da auditoria (ferramentas, regras, cache, modelo/provedor, tokens, latência e `trace_id`). Mensagens sem auditoria (anteriores à `#35`) usam os mesmos campos gravados no `RespostaTurno`.
+- **Dados pessoais conforme o perfil (`#33`):** para `funcionario` (operador), perguntas e respostas saem como foram exibidas, com a PII restaurada na etapa 4c; para `produtor`, passam pelo `Mascarador` (`[CPF_1]`, `[PIX_1]`…), já que o arquivo sai do sistema. Rascunhos e relatórios gerados ficam sempre mascarados, e os metadados da auditoria já são gravados mascarados.
+- **Sem contexto na nova sessão:** "Nova sessão" chama `memoria.nova_sessao`, que encerra a sessão (`encerrada_em`) e abre outra; `carregar_historico` só lê a sessão ativa, então a nova conversa começa com `message_history` vazio. A conversa anterior só volta como relatório.
+- **Interface:** o diálogo "Nova sessão" oferece `st.download_button` "Baixar relatório da conversa" e a pré-visualização antes da confirmação; a sidebar lista as sessões anteriores (somente leitura), cada uma abrindo o relatório com download.
+- **Critério de aceite** coberto em `tests/agent/test_relatorio_conversa.py` (banco) e `tests/ui/test_app.py` (interface).
+
+---
+
 ### 💬 Issue `#13` — Interface Streamlit (Chat, Trava de Turno, Seletor de Usuário e Fontes)
 - **Status: ✅ implementada** em [`src/sabor/ui/app.py`](../../src/sabor/ui/app.py) (rodar com `uv run sabor`).
 - **Fluxo do turno:** `st.chat_input` → `executar_turno()` → `processar_turno(sessao_id, mensagem, usuario, carregar_memoria=..., salvar_memoria=..., requisicoes_na_sessao=...)` → `st.rerun()`. Os hooks das etapas 1 e 5b abrem e fecham conexões curtas: nenhuma conexão de escrita fica aberta durante a chamada ao modelo. O `processar_turno` chama `salvar_memoria` em todos os desfechos, inclusive falha segura. O histórico exibido sai sempre de `mensagens` (banco), nunca de `st.session_state`.
@@ -291,7 +301,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Seletor de usuário simulado:** `Dona Lúcia`, `Seu Antônio` (perfil funcionário) e `P001`…`P018` (perfil produtor), persistido em `?usuario=` na URL. Cada usuário tem a própria sessão ativa.
 - **Relatórios sob demanda (`#15`):** cada `turno.relatorios` vira um bloco com `st.download_button` (`.md`) e pré-visualização, também nas mensagens do histórico.
 - **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular; completo para a equipe interna, como o texto restaurado na etapa 4c, e com dados pessoais ocultos/mascarados e só os próprios registros para o perfil produtor), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
-- **Nova sessão:** diálogo com "Baixar relatório da conversa" (`ui/relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
+- **Nova sessão:** diálogo com "Baixar relatório da conversa" (`agent/relatorio_conversa.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
 - **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos) e status do banco.
 - **Sugestões de perguntas** da demo por perfil: balões na área do chat, abaixo da saudação do CajAI; com a conversa em andamento, ficam no botão "Sugestões de perguntas" no fim do chat (#56).
 

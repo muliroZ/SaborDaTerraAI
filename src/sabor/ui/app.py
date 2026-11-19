@@ -36,7 +36,7 @@ from sabor.agent.schemas import Fonte
 from sabor import triagem
 from sabor.db import conectar, conectar_readonly
 from sabor.ui import apresentacao as ap
-from sabor.ui.relatorio import FUSO, relatorio_da_sessao
+from sabor.agent.relatorio_conversa import FUSO, relatorio_da_sessao
 
 logger = logging.getLogger(__name__)
 
