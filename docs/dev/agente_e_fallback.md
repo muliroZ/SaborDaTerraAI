@@ -29,11 +29,12 @@ src/sabor/
 │   ├── apresentacao.py      # Regras de exibição sem Streamlit: usuários simulados, destaques, badges e trecho das fontes
 │   └── relatorio.py         # Relatório Markdown somente leitura da conversa, sem LLM (#38)
 ├── tools/                   # Pacote modular das ferramentas read-only do agente
-│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido e resumir_produtor
+│   ├── __init__.py          # Exporta buscar_produtores, consultar_financeiro, rastrear_lote, consultar_preco, consultar_safra, buscar_documentos, extrair_e_classificar_pedido, resumir_produtor e gerar_relatorio
 │   ├── base.py              # Contratos e utilitários compartilhados (Usuario, SemPermissao, filtros e mascaramento)
 │   ├── consultar_dados.py   # Ferramentas de consulta SQL read-only (#7)
 │   ├── documentos.py        # Ferramenta buscar_documentos com busca híbrida lexical + vetorial (#8)
 │   ├── pedidos.py           # Ferramenta extrair_e_classificar_pedido: extração estruturada e validação dia × data (#9)
+│   ├── relatorios.py        # Ferramenta gerar_relatorio: contas a receber, orgânicos vigentes e dossiê ADAGRO em Markdown (#15)
 │   ├── regras.py            # Motor de regras determinísticas de classificação de pedidos, urgência e elegibilidade (#10, reutilizável na #34)
 │   └── resumir_produtor.py  # Ferramenta resumir_produtor com vendas, pendências, pedidos elegíveis, alertas e rascunho (#11)
 ├── sql/
@@ -68,6 +69,7 @@ tests/
     ├── test_consulta_dados.py   # Testes unitários e de integração das tools SQL da Issue #7 (produtores, financeiro, ...)
     ├── test_buscar_documentos.py # Testes unitários e de integração da busca híbrida lexical + vetorial (#8)
     ├── test_pedidos.py          # Testes da extração estruturada, mascaramento PII antes do LLM e conflito dia × data (#9)
+    ├── test_relatorios.py       # Relatórios sob demanda: valores, RBAC, dossiê PED-2026-014, inventário e acervo indisponível (#15)
     ├── test_regras_pedidos.py   # Testes parametrizados das 15 mensagens contra a matriz de pedidos.md e elegibilidade PNAE/SIE (#10)
     └── test_resumir_produtor.py # Testes da tool resumir_produtor: P001 (set/out/pendente), RBAC e alertas P004/P008/P017 (#11)
 ```
@@ -95,17 +97,19 @@ Injetado automaticamente nas ferramentas e no prompt dinâmico via `RunContext[A
 - `dataset_version: str` — Versão/hash da carga de dados (padrão `'v1'`).
 - `usuario: str` — Operador ativo selecionado na interface (padrão `'Dona Lúcia'`).
 - `mascarador: Any` — Objeto com `.mascarar(str) -> str` e `.restaurar(str) -> str` (padrão `MascaradorNoOp()`).
+- `relatorios: list[Relatorio]` — Relatórios gerados pelas tools no turno (`#15`); o runner limpa no início e anexa à resposta na Etapa 4.
 
 ### 3.2. Saída Estruturada do LLM (`RespostaAgente` — Etapa 3.4)
 - `texto: str` — Resposta em PT-BR para o operador interno.
 - `fontes: list[Fonte]` — Lista de citações (`arquivo` + `referencia`), formatáveis via `.formatar()` como `[arquivo · referencia]`.
 - `flags: list[Flag]` — Alertas identificados (`fora_de_safra`, `acima_capacidade`, `conformidade`, `inadimplencia`, `ambiguidade`, `privacidade`).
 - `rascunhos: list[Rascunho]` — Mensagens prontas (`destinatario`, `conteudo` em formato padrão limpo e `canal: str | None = None`) para revisão da equipe.
+- `relatorios: list[Relatorio]` — **Fora do JSON Schema enviado ao LLM** (`SkipJsonSchema`): preenchido pelo runner com os relatórios das tools (`#15`), para o modelo não reescrever o arquivo.
 
 ### 3.3. Retorno do Turno (`RespostaTurno`)
 Consolida a `RespostaAgente` + metadados técnicos e de auditoria:
 - `sessao_id: str`, `usuario: str`
-- `texto: str`, `fontes: list[Fonte]`, `flags: list[Flag]`, `rascunhos: list[Rascunho]`
+- `texto: str`, `fontes: list[Fonte]`, `flags: list[Flag]`, `rascunhos: list[Rascunho]`, `relatorios: list[Relatorio]`
 - `bloqueado_guardrail: bool` — `True` quando o turno retorna antecipadamente por bloqueio na Etapa 2 (ou quando estoura `UsageLimits`).
 - `retorno_antecipado: RetornoAntecipado | None` — Objeto padronizado com `motivo` (`ENTRADA_VAZIA`, `TAMANHO_EXCEDIDO`, `FORA_DE_ESCOPO`, `PROMPT_INJECTION`, `CACHE_HIT`, `COTA_SESSAO_ESGOTADA`, `ORCAMENTO_TURNO_ESGOTADO`), `mensagem` e `fontes`.
 
@@ -206,6 +210,17 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
   - **Rascunho na resposta estruturada:** Devolve `Rascunho(destinatario=..., conteudo=...)` com texto em formatação padrão limpa, tom simples e direto, e compradores mascarados via `ctx.deps.mascarador`.
 - **Controle de acesso (RBAC):** Funcionário pode consultar qualquer produtor; perfil `produtor` só acessa o próprio resumo (tentativas de consultar terceiros disparam `SemPermissao`).
 ### -----------------------------------------------------------------------------------------
+
+### ✅ Issue `#15` — Relatórios Autônomos sob Demanda (`src/sabor/tools/relatorios.py`) — *Concluída*
+- **Ferramenta registrada no agente:** `gerar_relatorio(ctx, tipo)`, com `tipo` em:
+  - `contas_a_receber` — pendências vencidas × a vencer por comprador, com maior atraso e transações (`consultar_financeiro`). Na data de referência: R$ 8.690,00 vencidos (SuperBom R$ 6.020,00, PNAE R$ 2.670,00) e R$ 4.690,00 a vencer.
+  - `organicos_vigentes` — produtores com certificação vigente agrupados por produto (`buscar_produtores(organico=True)`), cada produto confirmado só na seção `PRODUTOS CERTIFICADOS` do próprio certificado (`buscar_documentos`, com busca direcionada ao produtor se a ampla não trouxer a seção), numa linha que não o exclua ("não contemplado", "exceto"); observações e outras seções não confirmam produto; renovação em até 90 dias (P004, P012) e certificação vencida ainda marcada no cadastro (P008) em "Atenção".
+  - `dossie_adagro` — para a notificação `PED-2026-014`: cita o que foi pedido e, para cada item, o que existe e o que falta (cadastro, certificações, laudos dos últimos 12 meses, últimos 3 lotes por produto, contratos institucionais), além das NCs da inspeção anterior com indício de descumprimento (NC-001: venda de frango em `FIN-2026-018`). Restrito ao perfil funcionário.
+- **Como o arquivo chega à UI:** a tool monta o Markdown sem LLM, guarda em `ctx.deps.relatorios` e devolve ao modelo só `destaques` (cada um com as próprias fontes). Na Etapa 4 o runner **sempre sobrescreve** `RespostaAgente.relatorios` com o que as tools geraram (um valor enviado pelo modelo no `final_result` é descartado), passando o Markdown pelo mascarador (sem restaurar, como os rascunhos) antes do guardrail de saída e do `pos_processar`. O guardrail de saída avalia o texto do modelo e não remove os relatórios, montados sem LLM; daí seguem em `RespostaTurno.relatorios` para auditoria, memória (só o texto entra no contexto) e para a UI, que mostra o botão de download e a pré-visualização.
+- **Guardrails:** o pedido passa pelo guardrail de entrada e pelos `UsageLimits` como qualquer turno; as consultas herdam o filtro por perfil e o mascaramento das tools `#7`/`#8`. - **Ausência documental:** só é afirmada pelo **inventário do acervo** (`listar_documentos`, tabela `documentos`, com o filtro por perfil); uma busca sem resultado nunca vira "não existe". Documento no inventário cujo trecho não foi lido aparece como "não foi possível confirmar" (lista de produtos do certificado, data do laudo, contratante do contrato). Com a busca fora do ar, a existência vem do inventário e o que depende do texto fica a confirmar.
+- **Apoio:** `listar_lotes` (em `consultar_dados.py`) e `listar_documentos` (em `documentos.py`), não exportadas como tools, e `ProdutorResultado.produtos_origem_animal`.
+- **Não confundir** com o relatório da conversa (`#38`, `relatorio.py`), que agora apenas lista os relatórios gerados em cada turno.
+### -----------------------------------------------------------------------------------------
 ---
 
 ### 🧠 Issue `#31` — Memória de Sessão no PostgreSQL (Etapas 1 e 5b)
@@ -253,6 +268,7 @@ O núcleo do agente e o `processar_turno` já deixaram todos os pontos de extens
 - **Fluxo do turno:** `st.chat_input` → `executar_turno()` → `processar_turno(sessao_id, mensagem, usuario, carregar_memoria=..., salvar_memoria=..., requisicoes_na_sessao=...)` → `st.rerun()`. Os hooks das etapas 1 e 5b abrem e fecham conexões curtas: nenhuma conexão de escrita fica aberta durante a chamada ao modelo. O `processar_turno` chama `salvar_memoria` em todos os desfechos, inclusive falha segura. O histórico exibido sai sempre de `mensagens` (banco), nunca de `st.session_state`.
 - **Trava de turno:** o input e os botões ficam desabilitados enquanto o turno roda (`submit_mode='disable'` + flag `processando`) e há uma `threading.Lock` por `sessao_id` no processo, que impede dois turnos simultâneos na mesma sessão (ex.: duas abas).
 - **Seletor de usuário simulado:** `Dona Lúcia`, `Seu Antônio` (perfil funcionário) e `P001`…`P018` (perfil produtor), persistido em `?usuario=` na URL. Cada usuário tem a própria sessão ativa.
+- **Relatórios sob demanda (`#15`):** cada `turno.relatorios` vira um bloco com `st.download_button` (`.md`) e pré-visualização, também nas mensagens do histórico.
 - **Exibição:** fontes em expander com o trecho (chunk do documento ou registro tabular; completo para a equipe interna, como o texto restaurado na etapa 4c, e com dados pessoais ocultos/mascarados e só os próprios registros para o perfil produtor), flags como badges coloridos (bloqueio em vermelho, urgência em laranja, ambiguidade em azul, privacidade em violeta), rascunhos em `st.code` copiável e retornos antecipados em caixas distintas (`info`/`warning`/`error`; cache hit vira selo verde).
 - **Nova sessão:** diálogo com "Baixar relatório da conversa" (`ui/relatorio.py`, `#38`), pré-visualização e confirmação; sessões anteriores ficam listadas na sidebar só para leitura.
 - **Sidebar:** data de referência, versão do dataset (com assinatura dos documentos ingeridos), status do banco e sugestões de perguntas da demo por perfil.

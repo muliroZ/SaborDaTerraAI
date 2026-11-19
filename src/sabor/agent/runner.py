@@ -41,6 +41,7 @@ from sabor.agent.guardrail_exit import processar_guardrail_saida
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
+    Relatorio,
     RespostaAgente,
     RespostaTurno,
     RetornoAntecipado,
@@ -80,8 +81,9 @@ NOMES_FERRAMENTAS_ESPERADAS = (
     'buscar_documentos',
     'resumir_produtor',
     'rascunhar_notificacao',
+    'gerar_relatorio',
 )
-"""Nomes de referência previstos na arquitetura (#7, #8, #9, #11, #12)."""
+"""Nomes de referência previstos na arquitetura (#7, #8, #9, #11, #12, #15)."""
 
 _PADRAO_SNAKE_CASE = re.compile(r'^[a-z][a-z0-9_]*$')
 
@@ -154,6 +156,35 @@ def criar_agente(
     )
     agente.instructions(instrucoes_contexto_turno)
     return agente
+
+
+def _anexar_relatorios(resposta: RespostaAgente, deps: AgentDeps) -> RespostaAgente:
+    """Etapa 4: anexa à resposta só os relatórios que as tools geraram no turno (#15).
+
+    `relatorios` fica fora do schema do LLM, mas o Pydantic ainda validaria um valor que o
+    modelo mandasse no `final_result`. Por isso o campo é sempre sobrescrito com o que está em
+    `deps.relatorios`: nenhum anexo vem do modelo.
+
+    O Markdown passa pelo mascarador como rede de segurança (o arquivo pode sair da
+    cooperativa, como o dossiê da ADAGRO) e, como os rascunhos, não tem a PII restaurada.
+    Se a mesma tool rodou mais de uma vez, fica a última versão de cada arquivo.
+
+    O guardrail de saída avalia o texto do modelo e não remove os relatórios: o conteúdo deles
+    é montado sem LLM, a partir das tools. A regra 4A, por exemplo, barra qualquer texto que
+    cite o P008 junto de "vigente", inclusive o resumo correto que o aponta como vencido.
+    """
+    lista = getattr(deps, 'relatorios', None)
+    gerados = [r for r in lista if isinstance(r, Relatorio)] if isinstance(lista, list) else []
+    if isinstance(lista, list):
+        lista.clear()
+
+    mascarar_fn = getattr(deps.mascarador, 'mascarar', None)
+    por_arquivo: dict[str, Relatorio] = {}
+    for relatorio in gerados:
+        if callable(mascarar_fn):
+            relatorio = relatorio.model_copy(update={'markdown': mascarar_fn(relatorio.markdown)})
+        por_arquivo[relatorio.nome_arquivo] = relatorio
+    return resposta.model_copy(update={'relatorios': list(por_arquivo.values())})
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
@@ -269,7 +300,7 @@ def _executar_com_prazo(
 
 
 def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
-    """Conta turnos do usuário, ignorando ModelRequests intermediários de tools."""
+    """Conta perguntas de usuário na sessão atual (ignora retornos de tools)."""
     return sum(
         1
         for msg in historico
@@ -326,8 +357,8 @@ def processar_turno(
     )
     conn_propria = None
     dataset_ver = deps.dataset_version if deps is not None else None
-    # A Etapa 2 usa a mesma versão que será injetada no prompt. O helper mantém cache
-    # por conexão por 60s, evitando varrer as tabelas em todo turno.
+    # A Etapa 2 usa a versão persistida pelo ETL/ingestão, que também será injetada no prompt.
+    # A leitura consulta uma linha de metadados, sem recalcular o hash das tabelas por turno.
     if not dataset_ver:
         conn_fingerprint = deps.conn if deps is not None else conectar_readonly()
         if deps is None:
@@ -413,6 +444,8 @@ def processar_turno(
         )
         if deps is not None and not deps_exec.dataset_version:
             deps_exec.dataset_version = obter_versao_dataset(deps_exec.conn)
+        if isinstance(getattr(deps_exec, 'relatorios', None), list):
+            deps_exec.relatorios.clear()  # só anexa o que for gerado neste turno (#15)
         mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
         mensagem_para_llm = (
             mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
@@ -488,7 +521,8 @@ def processar_turno(
     # Etapa 4: Pós-processamento e restauração de PII para o operador (#33)
     # -----------------------------------------------------------------------
     try:
-        resposta_final = _restaurar_pii_resposta(resultado.output, deps_exec.mascarador)
+        resposta_final = _anexar_relatorios(resultado.output, deps_exec)
+        resposta_final = _restaurar_pii_resposta(resposta_final, deps_exec.mascarador)
 
         # Limpa eventual transação abortada antes das consultas read-only do guardrail de saída.
         if conn_propria is not None:

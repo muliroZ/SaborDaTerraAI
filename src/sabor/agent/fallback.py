@@ -63,7 +63,9 @@ def ler_segundos_env(variavel: str, padrao: float) -> float:
         mensagem = f'{variavel} deve ser um número de segundos, recebido {bruto!r}.'
         raise ValueError(mensagem) from None
     if not math.isfinite(segundos) or segundos <= 0:
-        raise ValueError(f'{variavel} deve ser finito e maior que zero, recebido {bruto!r}.')
+        raise ValueError(
+            f'{variavel} deve ser um número finito maior que zero, recebido {bruto!r}.'
+        )
     return segundos
 
 

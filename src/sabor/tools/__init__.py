@@ -9,7 +9,7 @@ from sabor.tools.consultar_dados import (
     consultar_safra,
     rastrear_lote,
 )
-from sabor.tools.documentos import buscar_documentos
+from sabor.tools.relatorios import gerar_relatorio
 from sabor.tools.resumir_produtor import resumir_produtor
 from sabor.tools.rascunhar_notificacao import rascunhar_notificacao
 
@@ -20,6 +20,7 @@ __all__ = [
     'consultar_preco',
     'consultar_safra',
     'extrair_e_classificar_pedido',
+    'gerar_relatorio',
     'rastrear_lote',
     'resumir_produtor',
     'rascunhar_notificacao'

@@ -9,6 +9,7 @@ Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
   no processo impede dois turnos simultâneos na mesma sessão (ex.: duas abas abertas).
 - Seletor de usuário simulado (funcionários e produtores P001…P018) no lugar da autenticação.
 - "Nova sessão" oferece o relatório da conversa anterior (#38).
+- Relatórios pedidos no chat (#15) aparecem na resposta com botão de download em Markdown.
 - "Caixa de entrada" (só equipe) mostra a fila da triagem em lote, ordenada por urgência (#14).
 """
 
@@ -227,7 +228,25 @@ def render_rascunhos(turno: RespostaTurno) -> None:
         st.caption('Revise antes de enviar. Use o ícone de cópia no canto da caixa.')
 
 
-def render_resposta(turno: RespostaTurno, usuario_id: str) -> None:
+def render_relatorios(turno: RespostaTurno, chave: str) -> None:
+    """Relatórios sob demanda (#15): download do Markdown e pré-visualização."""
+    for indice, relatorio in enumerate(turno.relatorios):
+        with st.container(border=True):
+            st.markdown(f':material/summarize: **{relatorio.titulo}**')
+            st.download_button(
+                f'Baixar {relatorio.nome_arquivo}',
+                relatorio.markdown,
+                file_name=relatorio.nome_arquivo,
+                mime='text/markdown',
+                icon=':material/download:',
+                on_click='ignore',
+                key=f'relatorio-{chave}-{indice}',
+            )
+            with st.expander('Pré-visualizar relatório'):
+                st.markdown(relatorio.markdown)
+
+
+def render_resposta(turno: RespostaTurno, usuario_id: str, chave: str = 'atual') -> None:
     destaque = ap.destaque_do_turno(turno)
     if destaque is not None and destaque.substitui_resposta:
         caixa = getattr(st, destaque.nivel)
@@ -238,6 +257,7 @@ def render_resposta(turno: RespostaTurno, usuario_id: str) -> None:
         st.markdown(turno.texto)
 
     render_flags(turno)
+    render_relatorios(turno, chave)
     render_rascunhos(turno)
     render_fontes(turno, usuario_id)
 
@@ -294,8 +314,17 @@ def dialogo_relatorio(sessao_id: str) -> None:
 
 @st.dialog('Caixa de entrada', width='large')
 def dialogo_caixa_entrada() -> None:
-    with conectar_readonly(tentativas=1) as conn:
-        fila = triagem.listar_fila(conn)
+    try:
+        with conectar_readonly(tentativas=1) as conn:
+            fila = triagem.listar_fila(conn)
+    except psycopg.Error:
+        logger.exception('Falha ao consultar a fila da caixa de entrada')
+        st.warning(
+            'Não consegui carregar a caixa de entrada. Verifique se o banco está no ar e '
+            'se `uv run python scripts/init_db.py` foi executado.',
+            icon=':material/warning:',
+        )
+        return
     triados = [f for f in fila if f['situacao'] == 'ok']
     if not triados:
         st.info(
@@ -498,7 +527,7 @@ def main() -> None:
                 st.markdown(msg.texto)
         elif msg.turno is not None:
             with st.chat_message('assistant'):
-                render_resposta(msg.turno, usuario_id)
+                render_resposta(msg.turno, usuario_id, chave=str(msg.id))
 
     placeholder = 'Pergunte sobre pedidos, produtores, lotes, safra…'
     st.chat_input(

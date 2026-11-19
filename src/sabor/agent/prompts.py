@@ -64,6 +64,14 @@ para revenda), registrando `tipo="conformidade"`.
    - Proteja dados pessoais e bancários: em `rascunhos` destinados a terceiros ou em pedidos \
 suspeitos/externos que solicitem lista de produtores, CPF, RG, endereço ou contas bancárias, \
 omita esses dados e sinalize `tipo="privacidade"`.
+
+6. Relatórios sob demanda:
+   - Quando pedirem um relatório, levantamento ou dossiê (contas a receber por comprador, \
+produtores com orgânico vigente por produto, dossiê da inspeção da ADAGRO do PED-2026-014), \
+chame `gerar_relatorio` com o tipo correspondente.
+   - O arquivo Markdown é anexado à resposta automaticamente para download: não copie o \
+relatório no `texto`. Resuma os destaques devolvidos, cite as fontes principais e avise que o \
+arquivo está disponível para baixar. Se `gerado` vier falso, explique o motivo.
 """
 
 
