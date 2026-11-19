@@ -36,8 +36,6 @@ def test_timeout_padrao_turno_e_20_segundos():
 
 
 def test_processar_turno_fluxo_completo_etapas_1_a_5():
-    from pydantic_ai.messages import ToolReturnPart
-
     etapas_executadas: list[str] = []
 
     def fn_tool_fin(ctx: RunContext[AgentDeps]) -> dict:
@@ -60,7 +58,7 @@ def test_processar_turno_fluxo_completo_etapas_1_a_5():
             return ModelResponse(
                 parts=[ToolCallPart(tool_name='fn_tool_fin', args={}, tool_call_id='call_fin')]
             )
-            return ModelResponse(
+        return ModelResponse(
             parts=[
                 ToolCallPart(
                     tool_name='final_result',
@@ -396,7 +394,6 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
     para o guardrail de saída consultar o banco, e é fechada logo depois."""
     import psycopg
     import pytest
-    from pydantic_ai.messages import ToolReturnPart
 
     import sabor.agent.runner as runner
     from sabor.db import conectar_readonly
@@ -426,7 +423,7 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
             return ModelResponse(
                 parts=[ToolCallPart(tool_name='fn_tool_preco', args={}, tool_call_id='call_preco')]
             )
-            return ModelResponse(
+        return ModelResponse(
             parts=[
                 ToolCallPart(
                     tool_name='final_result',
@@ -743,14 +740,13 @@ def test_relatorio_continua_anexado_quando_o_guardrail_de_saida_reescreve_o_text
 
 def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
     """Regra 4b (#34): fonte citada pelo modelo sem respaldo nas tools do turno é bloqueada."""
-    from pydantic_ai import RunContext
-    from pydantic_ai.messages import ToolReturnPart
 
     def consultar_financeiro_fake(ctx: RunContext[AgentDeps]) -> dict:
         return {
             'arquivo': 'financeiro.csv',
             'referencia': 'FIN-2026-001',
             'valor': 'R$ 1.090,00',
+            'produtos': ['mel'],
         }
 
     def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
@@ -768,7 +764,7 @@ def test_processar_turno_barra_fonte_inventada_pela_regra_4b():
                     args={
                         'texto': 'O preço vigente do mel é R$ 45,00 por kg.',
                         'fontes': [
-                            {'arquivo': 'fonte_inventada.csv', 'referencia': 'FAKE-001'}
+                            {'arquivo': 'fonte_inventada.csv', 'referencia': 'mel'}
                         ],
                     },
                 )

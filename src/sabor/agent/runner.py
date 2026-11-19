@@ -308,27 +308,35 @@ def _contar_turnos_historico(historico: Sequence[ModelMessage]) -> int:
     )
 
 
-def _coletar_fontes_valor(valor: Any, destino: list[str]) -> None:
+def _coletar_fontes_valor(
+    valor: Any, destino: list[str], *, aceitar_str: bool = False
+) -> None:
     if valor is None:
         return
-    if hasattr(valor, "model_dump"):
+    if hasattr(valor, 'model_dump'):
         valor = valor.model_dump()
     if isinstance(valor, dict):
-        arquivo = valor.get("arquivo")
-        referencia = valor.get("referencia")
+        arquivo = valor.get('arquivo')
+        referencia = valor.get('referencia')
         if isinstance(arquivo, str) and arquivo.strip():
-            ref = f" {referencia.strip()}" if isinstance(referencia, str) and referencia.strip() else ""
-            destino.append(f"{arquivo.strip()}{ref}")
-        for chave in ("fontes", "fonte"):
+            ref = (
+                f' {referencia.strip()}'
+                if isinstance(referencia, str) and referencia.strip()
+                else ''
+            )
+            destino.append(f'{arquivo.strip()}{ref}')
+        for chave in ('fontes', 'fonte'):
             if chave in valor:
-                _coletar_fontes_valor(valor[chave], destino)
+                _coletar_fontes_valor(valor[chave], destino, aceitar_str=True)
         for k, v in valor.items():
-            if k not in ("arquivo", "referencia", "fontes", "fonte") and isinstance(v, (dict, list)):
-                _coletar_fontes_valor(v, destino)
-    elif isinstance(valor, list):
+            if k not in ('arquivo', 'referencia', 'fontes', 'fonte') and isinstance(
+                v, (dict, list, tuple)
+            ):
+                _coletar_fontes_valor(v, destino, aceitar_str=False)
+    elif isinstance(valor, (list, tuple)):
         for item in valor:
-            _coletar_fontes_valor(item, destino)
-    elif isinstance(valor, str) and valor.strip():
+            _coletar_fontes_valor(item, destino, aceitar_str=aceitar_str)
+    elif aceitar_str and isinstance(valor, str) and valor.strip():
         destino.append(valor.strip())
 
 
