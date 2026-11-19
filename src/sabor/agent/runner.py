@@ -139,17 +139,21 @@ def criar_agente(
     gemini_api_key: str | None = None,
     openrouter_api_key: str | None = None,
     timeout_s: float | None = None,
+    cooldown_s: float | None = None,
 ) -> Agent[AgentDeps, RespostaAgente]:
     """Cria e configura o agente único PydanticAI com prompt, fallback e tools disponíveis.
 
     `timeout_s` é o limite de cada chamada de modelo da cadeia de fallback; `None` usa
     `MODELO_TIMEOUT_S` do `.env` ou o padrão de `fallback.TIMEOUT_POR_MODELO_S`.
+    `cooldown_s` controla a quarentena do circuit breaker por modelo com falha transitória
+    (`None` usa `FALLBACK_COOLDOWN_S` ou `fallback.COOLDOWN_CIRCUIT_BREAKER_S`; `0` desliga).
     """
     capability_fallback = construir_capability_fallback(
         modelos,
         gemini_api_key=gemini_api_key,
         openrouter_api_key=openrouter_api_key,
         timeout_s=timeout_s,
+        cooldown_s=cooldown_s,
     )
     ferramentas_ativas = list(tools) if tools is not None else carregar_ferramentas_registradas()
     # `instructions` (e não `system_prompt`): o PydanticAI só envia o system prompt quando o

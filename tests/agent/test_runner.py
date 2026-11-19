@@ -456,6 +456,7 @@ def test_turno_com_postgres_real_executa_guardrail_saida_antes_de_fechar_conexao
 def test_timeouts_configuraveis_pelo_ambiente(monkeypatch):
     import pytest
 
+    from sabor.agent import fallback as modulo_fallback
     from sabor.agent.fallback import (
         TIMEOUT_POR_MODELO_S,
         construir_modelos_padrao,
@@ -463,6 +464,7 @@ def test_timeouts_configuraveis_pelo_ambiente(monkeypatch):
     )
     from sabor.agent.runner import obter_timeout_turno
 
+    monkeypatch.setattr(modulo_fallback, 'load_dotenv', lambda: None)
     monkeypatch.delenv('MODELO_TIMEOUT_S', raising=False)
     monkeypatch.delenv('TURNO_TIMEOUT_S', raising=False)
     assert obter_timeout_por_modelo() == TIMEOUT_POR_MODELO_S == 12.0
