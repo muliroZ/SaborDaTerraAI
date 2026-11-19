@@ -632,6 +632,19 @@ def test_limpar_citacoes_inline_remove_crases_e_conforme():
     assert limpar_citacoes_inline_texto(bruto) == 'Queijo coalho vencido há 12 dias.'
 
 
+def test_circuit_breaker_segue_apenas_cause_e_ignora_context():
+    from sabor.agent.fallback import _eh_falha_circuit_breaker
+
+    erro_com_contexto = ValueError('erro local')
+    erro_com_contexto.__context__ = TimeoutError('timeout anterior')
+    assert _eh_falha_circuit_breaker(erro_com_contexto) is False
+
+    erro_com_causa = ModelAPIError(model_name=MODELO_PRIMARIO, message='timeout encadeado')
+    erro_com_causa.__cause__ = TimeoutError('timeout real')
+    assert _eh_falha_circuit_breaker(erro_com_causa) is True
+
+
+
 
 
 

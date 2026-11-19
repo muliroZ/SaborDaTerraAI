@@ -118,7 +118,11 @@ def obter_cooldown_circuit_breaker() -> float:
     return segundos
 
 
-def _eh_erro_rede_ou_timeout(exc: BaseException | None) -> bool:
+def _eh_erro_rede_ou_timeout(
+    exc: BaseException | None,
+    *,
+    seguir_contexto: bool = True,
+) -> bool:
     """Verifica se a exceção (ou sua causa imediata) é timeout ou erro de transporte HTTP."""
     atual = exc
     visitados: set[int] = set()
@@ -126,7 +130,7 @@ def _eh_erro_rede_ou_timeout(exc: BaseException | None) -> bool:
         visitados.add(id(atual))
         if isinstance(atual, (TimeoutError, httpx.TimeoutException, httpx.TransportError)):
             return True
-        atual = atual.__cause__ or atual.__context__
+        atual = atual.__cause__ or (atual.__context__ if seguir_contexto else None)
     return False
 
 
@@ -431,10 +435,10 @@ def _eh_falha_circuit_breaker(exc: Exception) -> bool:
         return exc.status_code == 429 or exc.status_code >= 500
     if isinstance(exc, ModelRequestTimeout):
         return True
-    if _eh_erro_rede_ou_timeout(exc):
+    if _eh_erro_rede_ou_timeout(exc, seguir_contexto=False):
         return True
     if isinstance(exc, ModelAPIError):
-        return _eh_erro_rede_ou_timeout(exc.__cause__)
+        return _eh_erro_rede_ou_timeout(exc.__cause__, seguir_contexto=False)
     return False
 
 
