@@ -1,6 +1,6 @@
 # `certificacoes/` — Certificados, laudos e inspeção
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Documentos regulatórios em texto livre (TXT com layout de formulário). Definem **o que pode ser vendido como orgânico** e **o que pode ser vendido a terceiros**, que são as duas restrições de maior risco para o assistente.
 

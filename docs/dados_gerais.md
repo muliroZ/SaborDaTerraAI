@@ -51,7 +51,46 @@ erDiagram
     COMPRADOR ||--o{ TRANSACAO : "nome (texto)"
     COMPRADOR ||--o| CONTRATO : "nome (texto)"
     COMPRADOR ||--o{ PEDIDO : "nome (texto livre)"
+    SESSAO ||--o{ MENSAGEM : "sessao_id"
+    MENSAGEM ||--o| AUDITORIA_MENSAGEM : "message_id"
+    SESSAO {
+        string id PK
+        string usuario_id
+        string perfil
+        timestamp criada_em
+        timestamp encerrada_em
+    }
+    MENSAGEM {
+        bigint id PK
+        string sessao_id FK
+        string papel
+        jsonb conteudo
+        timestamp criada_em
+    }
+    AUDITORIA_MENSAGEM {
+        bigint id PK
+        bigint message_id FK
+        string sessao_id FK
+        string usuario_id
+        string perfil
+        string modelo
+        string provedor
+        jsonb ferramentas
+        jsonb fontes
+        jsonb regras_disparadas
+        string retorno_antecipado
+        boolean cache_hit
+        integer tokens_entrada
+        integer tokens_saida
+        integer latencia_ms
+        string trace_id
+        timestamp criada_em
+    }
 ```
+
+Cada resposta do assistente é uma linha em `auditoria_mensagens`, ligada à mensagem
+correspondente por `message_id`; mensagens do usuário não recebem auditoria. Uma sessão
+contém várias mensagens, e as auditorias se associam à sessão por meio da mensagem.
 
 **Chaves e joins — o que funciona e o que não funciona:**
 
@@ -123,4 +162,5 @@ Pedidos que **solicitam** esses dados e exigem cuidado: PED-2026-009 (Hospital p
 - **Vai desenhar a arquitetura ou preparar a demonstração?** Comece por [projeto.md](projeto.md), que tem os requisitos ligados às fontes, as perguntas de referência e as lacunas em que o assistente deve dizer "não encontrei".
 - **Vai construir a ingestão ou os embeddings?** Comece pelo schema de cada fonte e pela seção "Qualidade dos dados" do doc correspondente.
 - **Vai escrever prompts ou regras do assistente?** Leia [pedidos.md](fontes/pedidos.md), que traz a triagem das 15 mensagens com as fontes e restrições envolvidas em cada uma, e [certificacoes.md](fontes/certificacoes.md), que traz as regras de conformidade.
+- **Vai subir a demo em Docker ou fazer o deploy no Google Cloud?** Veja [arquitetura/deploy_gcp.md](arquitetura/deploy_gcp.md), com o mapeamento local → GCP (Cloud Run + Cloud SQL) e o Plano B local.
 - **Vai fazer cotações ou checar disponibilidade?** Use [tabela_precos.md](fontes/tabela_precos.md), [sazonalidade.md](fontes/sazonalidade.md) e [fichas_tecnicas.md](fontes/fichas_tecnicas.md), que traz a capacidade semanal por produtor.

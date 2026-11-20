@@ -1,6 +1,6 @@
 # `lotes.csv` — Rastreabilidade de lotes
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Registro dos lotes entregues entre **02/09 e 25/10/2026**: origem (produtor, data de colheita ou fabricação), transporte, validade e inspeção visual. É a base para responder a exigências de rastreabilidade (Hospital, PNAE, ADAGRO).
 

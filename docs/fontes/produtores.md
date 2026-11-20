@@ -1,6 +1,6 @@
 # `produtores.csv` — Cadastro de produtores
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Cadastro mestre dos 18 produtores cooperados. É a **tabela de referência** do conjunto: `financeiro.csv` e `lotes.csv` apontam para ela pelo `id`, e os certificados e laudos citam o mesmo ID no nome do arquivo.
 
@@ -85,8 +85,8 @@ produtores["organico_vigente"] = produtores["validade_certificacao"].ge(ref)
 | Apícolas | P002, P008, P018 |
 | Hortaliças | P004, P009, P012 (todos orgânicos) |
 | Raízes e derivados | P005, P013, P015 (inativo) |
-| Doces e derivados de cana | P008 (geleia, doce), P016 |
-| Aves | P017 |
+| Doces e conservas | P008 (geleia, doce), P016 |
+| Aves e ovos| P017 |
 
 ## Atributos que só existem em outras fontes
 
