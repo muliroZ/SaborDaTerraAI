@@ -27,6 +27,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from sabor.agent.deps import AgentDeps
+from sabor.tools.base import SemPermissao, _resolver_usuario
 from sabor.tools.catalogo import Catalogo
 from sabor.tools.datas import normalizar, resolver_data
 from sabor.tools.regras import classificar_pedido
@@ -353,6 +354,12 @@ async def extrair_e_classificar_pedido(
         pedido_id: ID de um pedido da caixa de entrada, ex.: "PED-2026-003".
         texto: Mensagem colada no chat, quando não houver ID. Informe só um dos dois.
     """
+    usuario_raw = getattr(ctx.deps, 'usuario', None)
+    usuario_obj = _resolver_usuario(usuario_raw if usuario_raw is not None else 'funcionario')
+    if usuario_obj.perfil == 'produtor':
+        raise SemPermissao(
+            'Apenas membros da equipe podem consultar e triar pedidos da caixa de entrada.'
+        )
     try:
         return await extrair_e_classificar(
             ctx.deps, pedido_id=pedido_id, texto=texto, usage=ctx.usage

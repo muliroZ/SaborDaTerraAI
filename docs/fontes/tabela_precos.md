@@ -1,6 +1,6 @@
 # `tabela_precos_outubro_2026.csv` — Tabela de preços
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Preços de referência da cooperativa em **outubro/2026**, com a versão convencional e a orgânica de cada produto e as regras de desconto no atacado. É a base para cotações. Contratos com preço próprio (o PNAE) **têm precedência** sobre esta tabela.
 

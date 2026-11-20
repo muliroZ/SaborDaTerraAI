@@ -47,12 +47,3 @@ As expressões regulares foram construídas com *lookarounds* para **não** masc
 Conforme documentado em [`docs/README.md`](../README.md#dados-sensíveis-lgpd):
 1. **Para o operador interno (`turno.texto`):** `_restaurar_pii_resposta` chama `mascarador.restaurar(resposta.texto)`, permitindo que Dona Lúcia e Seu Antônio vejam os dados necessários ao trabalho interno sem que esses dados tenham passado pelo provedor de LLM.
 2. **Para terceiros (`turno.rascunhos`):** `_restaurar_pii_resposta` **nunca** executa `restaurar()` sobre os itens de `rascunhos`, impedindo vazamento de CPF, RG, telefone ou dados bancários em mensagens para compradores ou terceiros.
-
----
-
-## 4. Guia para as Issues Pendentes (`#9`, `#11`, `#12`)
-
-Quando as ferramentas de triagem (`#9`), resumo do produtor (`#11`) e rascunho de notificação (`#12`) forem adicionadas a [`src/sabor/tools.py`](../../src/sabor/tools.py):
-- Acesse o mascarador do turno via `mascarador = ctx.deps.mascarador`.
-- Para textos livres ou observações: use `mascarador.mascarar(texto)`.
-- Para campos opcionais de tabela: use `_mascarar_opcional(mascarador, valor)` (ou `_mascarar_pix(mascarador, valor)` para chaves PIX).

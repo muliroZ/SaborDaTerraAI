@@ -1,6 +1,6 @@
 # `pedidos.json` — Caixa de entrada
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Quinze mensagens recebidas entre **28/10/2026 09:15 e 30/10/2026 16:00** por e-mail, WhatsApp e formulário web. Apesar do nome, nem todas são pedidos: há cotações, consultas de produtores e uma notificação de fiscalização. É a fonte principal para **testar o assistente**, porque cada mensagem exige cruzar várias outras fontes e algumas trazem armadilhas de conformidade, privacidade ou ambiguidade.
 

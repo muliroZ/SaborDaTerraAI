@@ -317,10 +317,22 @@ def _anexar_flags(
     return resposta.model_copy(update={'flags': [*unicas.values(), *do_modelo]})
 
 
+def _desescapar_quebras_linha(texto: str) -> str:
+    """Converte sequências literais `\\n` / `\\r\\n` devolvidas por LLMs em quebras reais."""
+    if '\\n' not in texto:
+        return texto
+    return texto.replace('\\r\\n', '\n').replace('\\n', '\n')
+
+
 def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAgente:
-    """Move citações `[arquivo · ref]` do texto para `fontes` e limpa blocos `Fontes:`."""
+    """Move citações `[arquivo · ref]` do texto para `fontes`, limpa `Fontes:` e
+    desescapa `\\n` literais em `texto` e `rascunhos`."""
+    rascunhos_norm = [
+        r.model_copy(update={'conteudo': _desescapar_quebras_linha(r.conteudo)})
+        for r in resposta.rascunhos
+    ]
     if not resposta.texto:
-        return resposta
+        return resposta.model_copy(update={'rascunhos': rascunhos_norm})
 
     fontes_atuais = list(resposta.fontes)
     vistas = {(f.arquivo.strip(), f.referencia.strip()) for f in fontes_atuais}
@@ -330,8 +342,10 @@ def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAge
             vistas.add(chave)
             fontes_atuais.append(Fonte(arquivo=chave[0], referencia=chave[1]))
 
-    texto_limpo = limpar_citacoes_inline_texto(resposta.texto)
-    return resposta.model_copy(update={'texto': texto_limpo, 'fontes': fontes_atuais})
+    texto_limpo = limpar_citacoes_inline_texto(_desescapar_quebras_linha(resposta.texto))
+    return resposta.model_copy(
+        update={'texto': texto_limpo, 'fontes': fontes_atuais, 'rascunhos': rascunhos_norm}
+    )
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
@@ -495,19 +509,55 @@ def _coletar_fontes_valor(
                 else ''
             )
             destino.append(f'{arquivo.strip()}{ref}')
+        pedido_id = valor.get('pedido_id')
+        if isinstance(pedido_id, str) and pedido_id.strip():
+            destino.append(f'pedidos.json {pedido_id.strip()}')
+        produtores_elegiveis = valor.get('produtores_elegiveis')
+        if isinstance(produtores_elegiveis, (list, tuple)):
+            for pid in produtores_elegiveis:
+                if isinstance(pid, str) and pid.strip():
+                    destino.append(f'produtores.csv {pid.strip()}')
         for chave in ('fontes', 'fonte'):
             if chave in valor:
                 _coletar_fontes_valor(valor[chave], destino, aceitar_str=True)
         for k, v in valor.items():
-            if k not in ('arquivo', 'referencia', 'fontes', 'fonte') and isinstance(
-                v, (dict, list, tuple)
-            ):
+            if k not in (
+                'arquivo',
+                'referencia',
+                'fontes',
+                'fonte',
+                'pedido_id',
+                'produtores_elegiveis',
+            ) and isinstance(v, (dict, list, tuple)):
                 _coletar_fontes_valor(v, destino, aceitar_str=False)
     elif isinstance(valor, (list, tuple)):
         for item in valor:
             _coletar_fontes_valor(item, destino, aceitar_str=aceitar_str)
     elif aceitar_str and isinstance(valor, str) and valor.strip():
         destino.append(valor.strip())
+
+
+def _citacoes_dos_destaques(part: ToolReturnPart) -> list[Fonte]:
+    """Citações `[arquivo · registro]` escritas nos destaques de `gerar_relatorio`.
+
+    O dossiê traz algumas fontes só no texto dos destaques. O modelo as copia para o texto,
+    o runner as move para `fontes`, e a 4B bloqueava a resposta por não achá-las entre as
+    fontes estruturadas (REL-07 do Bloco 4). Só os destaques contam: são montados pelo
+    sistema, sem texto de terceiros. Uma citação dentro de uma mensagem de cliente ecoada por
+    outra tool não vira fonte.
+    """
+    if part.tool_name != 'gerar_relatorio':
+        return []
+    conteudo = part.content.model_dump() if hasattr(part.content, 'model_dump') else part.content
+    destaques = conteudo.get('destaques') if isinstance(conteudo, dict) else None
+    if not isinstance(destaques, list):
+        return []
+    return [
+        Fonte(arquivo=arquivo.strip(), referencia=referencia.strip())
+        for destaque in destaques
+        if isinstance(destaque, str)
+        for arquivo, referencia in _PADRAO_CITACAO_FONTE_PONTO.findall(destaque)
+    ]
 
 
 def _sem_extensao(arquivo: str) -> str:
@@ -539,6 +589,7 @@ def _fontes_estruturadas_das_tools(novas_mensagens: Sequence[ModelMessage]) -> l
         for part in getattr(msg, 'parts', None) or ():
             if isinstance(part, ToolReturnPart):
                 percorrer(part.content)
+                fontes.extend(_citacoes_dos_destaques(part))
     return fontes
 
 
@@ -618,17 +669,19 @@ def _reconciliar_fontes_com_tools(
     return resposta.model_copy(update={'fontes': reconciliadas})
 
 
-TOOLS_COM_FONTES_DOS_RASCUNHOS = frozenset({'rascunhar_notificacao'})
-"""Tools cujas fontes (pedido e produtores de cada rascunho) sempre entram na resposta."""
+TOOLS_COM_FONTES_DOS_RASCUNHOS = frozenset({'rascunhar_notificacao', 'resumir_produtor'})
+"""Tools cujos rascunhos o runner anexa sem o modelo (F3) e cujas fontes, por isso, sempre
+entram na resposta: o pedido e os produtores de cada notificação, ou os registros do resumo."""
 
 
 def _completar_fontes_dos_rascunhos(
     resposta: RespostaAgente, novas_mensagens: Sequence[ModelMessage]
 ) -> RespostaAgente:
-    """Acrescenta as fontes de `rascunhar_notificacao` que o modelo não citou.
+    """Acrescenta as fontes das tools de rascunho que o modelo não citou.
 
     Os rascunhos são anexados sem passar pelo modelo (F3); as fontes deles também devem
-    estar na resposta. No REL-08 do Bloco 4, o modelo citou só o pedido em 2 de 3 rodadas.
+    estar na resposta. No REL-08 do Bloco 4, o modelo citou só o pedido em 2 de 3 rodadas;
+    no REL-04, depois do merge com o PR #74, deixou de mandar `fontes` e a 4B bloqueava.
     """
     retornos = [
         part
@@ -654,6 +707,7 @@ def _extrair_fontes_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[s
         for part in getattr(msg, "parts", None) or ():
             if isinstance(part, ToolReturnPart):
                 _coletar_fontes_valor(part.content, fontes)
+                fontes.extend(f'{f.arquivo} {f.referencia}' for f in _citacoes_dos_destaques(part))
     return fontes
 
 
@@ -898,6 +952,32 @@ def processar_turno(
         )
         persistir_e_auditar(turno_orcamento)
         return turno_orcamento
+    except SemPermissao as exc:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        mensagem_permissao = (
+            str(exc).strip()
+            or 'Você não tem permissão para executar esta operação com o perfil atual.'
+        )
+        logger.info(
+            'Acesso restrito desfecho=sem_permissao sessao=%s usuario=%s latencia_ms=%s',
+            sessao_id,
+            usuario,
+            latencia_ms,
+        )
+        retorno_permissao = RetornoAntecipado(
+            motivo='SEM_PERMISSAO',
+            mensagem=mensagem_permissao,
+        )
+        turno_permissao = RespostaTurno(
+            sessao_id=sessao_id,
+            usuario=usuario,
+            texto=retorno_permissao.mensagem,
+            bloqueado_guardrail=True,
+            retorno_antecipado=retorno_permissao,
+            latencia_ms=latencia_ms,
+        )
+        persistir_e_auditar(turno_permissao)
+        return turno_permissao
     except (
         TimeoutError,
         httpx.TimeoutException,

@@ -322,6 +322,25 @@ def test_normaliza_unidade(bruta, esperada):
     assert Item(produto_texto='x', unidade=bruta).unidade == esperada
 
 
+def test_produtor_nao_pode_triar_pedidos_da_caixa_de_entrada(conn, simular_llm):
+    """RBAC: perfil produtor não pode consultar/triar pedidos da caixa de entrada."""
+    from sabor.tools.base import SemPermissao
+
+    modelo = simular_llm(EXTRACOES['PED-2026-001'])
+    deps = AgentDeps(
+        conn=conn,
+        data_referencia=date(2026, 10, 30),
+        usuario='P001',
+        mascarador=Mascarador(),
+    )
+    ctx = SimpleNamespace(deps=deps, usage=RunUsage())
+
+    with pytest.raises(SemPermissao, match='Apenas membros da equipe'):
+        asyncio.run(extrair_e_classificar_pedido(ctx, pedido_id='PED-2026-001'))
+
+    assert modelo.prompts == []  # bloqueado antes de qualquer chamada ao LLM
+
+
 def test_item_que_o_modelo_marcou_ambiguo_resolve_por_nome_ou_sinonimo_exato():
     """F2 do Bloco 4: "banana prata" voltava ambígua do LLM e sumia da alocação do PED-002,
     embora seja sinônimo cadastrado de banana."""

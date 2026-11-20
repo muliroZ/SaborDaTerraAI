@@ -379,7 +379,7 @@ def _novo_tool_call_id() -> str:
 
 
 def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) -> None:
-    """Extrai pares `(arquivo, referencia)` reais de objetos `Fonte` nos retornos das tools."""
+    """Extrai pares `(arquivo, referencia)` reais de `Fonte` e `Pedido` nos retornos das tools."""
     if valor is None:
         return
     if isinstance(valor, dict):
@@ -388,8 +388,17 @@ def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) 
         if isinstance(arq, str) and isinstance(ref, str) and arq.strip() and ref.strip():
             destino.append((arq.strip(), ref.strip()))
             return
-        for v in valor.values():
-            _coletar_fontes_de_retorno_tool(v, destino)
+        pedido_id = valor.get('pedido_id')
+        if isinstance(pedido_id, str) and pedido_id.strip():
+            destino.append(('pedidos.json', pedido_id.strip()))
+        produtores_elegiveis = valor.get('produtores_elegiveis')
+        if isinstance(produtores_elegiveis, (list, tuple)):
+            for pid in produtores_elegiveis:
+                if isinstance(pid, str) and pid.strip():
+                    destino.append(('produtores.csv', pid.strip()))
+        for k, v in valor.items():
+            if k not in ('pedido_id', 'produtores_elegiveis'):
+                _coletar_fontes_de_retorno_tool(v, destino)
         return
     if isinstance(valor, (list, tuple, set)):
         for item in valor:
