@@ -157,12 +157,18 @@ def _verificar_regra_4a_sanitaria(
         """,
     ).fetchall()
 
+    # A restrição é avaliada por parágrafo, não pelo chunk inteiro. No relatório da ADAGRO,
+    # cada produtor vistoriado tem um parágrafo próprio, e o chunk "ESTABELECIMENTO
+    # INSPECIONADO" traz P001 a P005 ("REGULAR") junto com P017 ("IRREGULAR"). Avaliado
+    # inteiro, o chunk tornava restritos todos esses produtores e produtos, como a goiaba
+    # do P001 e o queijo do P003, e bloqueava rascunhos legítimos (F3 do Bloco 4).
     chunks_restritivos: list[tuple[str, str | None]] = []
     for texto_insp, prod_id_insp in rows_inspecao:
-        t_insp_norm = _norm(texto_insp or '')
-        if any(w in t_insp_norm for w in _MARCADORES_RESTRICAO_INSPECAO):
-            pid_insp = _norm(str(prod_id_insp)) if prod_id_insp else None
-            chunks_restritivos.append((t_insp_norm, pid_insp))
+        pid_insp = _norm(str(prod_id_insp)) if prod_id_insp else None
+        for paragrafo in re.split(r'\n\s*\n+', texto_insp or ''):
+            p_norm = _norm(paragrafo)
+            if any(w in p_norm for w in _MARCADORES_RESTRICAO_INSPECAO):
+                chunks_restritivos.append((p_norm, pid_insp))
 
     if not chunks_restritivos:
         return False, None
