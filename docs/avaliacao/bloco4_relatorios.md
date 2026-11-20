@@ -16,7 +16,7 @@ Legenda: ✅ atende ao esperado no PDF · ⚠️ atende ao esperado, mas com def
 | ID | Pedido | Resultado | Resumo |
 |---|---|---|---|
 | REL-01 | Resumo da Maria das Graças + rascunho | ⚠️ | Usa só `resumir_produtor`. Vendas R$ 1.090 / R$ 0, pendente R$ 0, sem NC falsa e com o card de rascunho. Mas afirma "nenhum pedido elegível", o que é falso (P001 tem goiaba no PED-2026-002): achado [F1](#f1). |
-| REL-02 | "Gere um relatório da Maria das Graças" | ⚠️ | Não cai em falha segura: o filtro de `prepare_tools` esconde `gerar_relatorio` e o pedido vai para `resumir_produtor`. Mas o modelo encadeia mais 2 ou 3 tools redundantes nas 3 rodadas: achado [F4](#f4). |
+| REL-02 | "Gere um relatório da Maria das Graças" | ⚠️ | Não cai em falha segura: o filtro de `prepare_tools` esconde `gerar_relatorio` e o pedido vai para `resumir_produtor`. Mas o modelo encadeia mais 2 ou 3 tools redundantes nas 3 rodadas: achado [F4](#f4), resolvido. |
 | REL-03 | Resumo do P008 e do P004 | ⚠️ | P008 aparece com certificação vencida desde 30/09/2026 e P004 vencendo em 01/12/2026 (3/3). Em 1 das 3 rodadas, os rascunhos saíram com `\n` literal no card ([F3](#f3), resolvido). A flag `inadimplencia` foi aplicada à P004, que é a credora ([F6](#f6)). |
 | REL-04 | Resumo do Cícero Romão (P003) | ❌ | Mostra R$ 6.020 vencidos, mas não cita a SuperBom (0/3) e diz "nenhum pedido elegível", quando existem pedidos abertos de queijo coalho, ricota e queijo manteiga: achados [F1](#f1) (resolvido) e [F5](#f5). |
 | REL-05 | Relatório de contas a receber | ✅ | Chama `gerar_relatorio('contas_a_receber')` e anexa `contas_a_receber_20261030.md`. O texto traz R$ 8.690 vencidos, R$ 4.690 a vencer e R$ 13.380 no total, sem colar o Markdown. Tabelas conferidas linha a linha. |
@@ -134,6 +134,26 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 - **Evidência:** no REL-02, as 3 rodadas chamaram `resumir_produtor` e, em seguida, `buscar_documentos`, `consultar_financeiro` e, em 2 rodadas, `buscar_produtores`. A latência foi de 5,5 a 6,3 s, contra cerca de 3 s no REL-01. A regra 7 do prompt ("chame apenas a única ferramenta... use somente `resumir_produtor`") não é seguida.
 - **Hipótese:** com `gerar_relatorio` escondido, a palavra "relatório" leva o modelo a "completar" o resumo, por exemplo com DAP/CAF e capacidade (dados corretos, conferidos nas fontes).
 - **Correção sugerida:** em `prepare_tools`, depois que `resumir_produtor` roda no turno, deixar só `final_result`, ou só as tools já usadas. Outra opção é explicitar no docstring de `resumir_produtor` que pedidos de "relatório de um produtor" se encerram nela.
+
+**Status: resolvido.**
+
+- **Remedição depois do F1 e do F3:** o REL-02 já não encadeava nada (0/5), mas o REL-01 ainda chamava `buscar_documentos` em 3 de 5 rodadas, sempre para checar a validade da certificação orgânica da P001.
+  - A causa: `resumir_produtor` só citava a certificação quando ela estava vencida ou vencia em até 45 dias.
+  - O custo: o turno ia de cerca de 9 mil para cerca de 16 mil tokens. Numa das rodadas, estourou o teto de 32 mil (`ORCAMENTO_TURNO_ESGOTADO`), e o operador recebeu "limite atingido". Antes do F1, o REL-02 chegava a 28 mil.
+- **Correção:**
+  - **Causa:** `ResumoProdutorResultado` passa a trazer sempre `certificacao_organica` (`vigente`, `vencida`, `sem_validade` ou `nao_possui`; nulo quando o produtor não é encontrado), `validade_certificacao` e `registro_sie`. O docstring diz que o resultado já é o panorama completo.
+  - **Trava:** `FallbackComCircuitBreaker.prepare_tools` (`src/sabor/agent/fallback.py`) oculta `TOOLS_COBERTAS_PELO_RESUMO` (`buscar_documentos`, `consultar_financeiro`, `buscar_produtores`) no restante do turno depois que `resumir_produtor` roda. `resumir_produtor` continua disponível para outro produtor, e uma consulta que o modelo já pediu no mesmo passo do resumo também.
+- **Testes:**
+  - `test_prepare_tools_oculta_consultas_cobertas_depois_do_resumo` (inclui um turno novo, para checar que a trava não vaza);
+  - `test_prepare_tools_mantem_consulta_ja_chamada_junto_com_o_resumo`;
+  - `test_resumo_traz_situacao_da_certificacao_e_sie` (P001 vigente, P008 vencida, P003 sem certificação e com SIE, produtor inexistente).
+
+  Os 3 falham sem a correção.
+- **Validação com o agente:** REL-01 a REL-04, 5 rodadas cada, 20 turnos.
+  - Todos usaram só `resumir_produtor`, sem bloqueio do guardrail.
+  - O REL-01 e o REL-02 ficaram em cerca de 9 mil tokens, e o REL-04 em cerca de 10 mil.
+  - No REL-03, o modelo resumiu os dois produtores em passos separados em 3 de 5 rodadas (cerca de 14 mil tokens), e isso continua funcionando.
+- **Limitação aceita:** numa pergunta composta, como "resuma o Cícero e diga quanto a SuperBom deve", a consulta extra só acontece se o modelo a pedir no mesmo passo do resumo. Esse caso fica menos importante com o [F5](#f5), que traz no resumo a quebra dos vencidos por comprador.
 
 ### F5
 

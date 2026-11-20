@@ -104,3 +104,22 @@ def test_produtores_regulares_na_adagro_nao_recebem_falso_positivo():
     assert any('laudo_sanitario_queijaria_cicero_p003' in a.lower() for a in res_p003.alertas)
     assert not any('inspecao_adagro' in a.lower() for a in res_p003.alertas)
     assert any('inspecao_adagro' in a.lower() for a in res_p017.alertas)
+
+
+def test_resumo_traz_situacao_da_certificacao_e_sie():
+    """F4 do Bloco 4: sem isso, o modelo complementava o resumo com `buscar_documentos`."""
+    with conectar_readonly() as conn:
+        maria = resumir_produtor(_ctx(conn), 'P001')
+        josefa = resumir_produtor(_ctx(conn), 'P008')
+        cicero = resumir_produtor(_ctx(conn), 'P003')
+        inexistente = resumir_produtor(_ctx(conn), 'P999')
+
+    assert (maria.certificacao_organica, maria.validade_certificacao) == (
+        'vigente', date(2027, 6, 15)
+    )
+    assert maria.registro_sie is None
+    assert (josefa.certificacao_organica, josefa.validade_certificacao) == (
+        'vencida', date(2026, 9, 30)
+    )
+    assert (cicero.certificacao_organica, cicero.registro_sie) == ('nao_possui', 'PE-SIE-0756')
+    assert inexistente.encontrado is False and inexistente.certificacao_organica is None

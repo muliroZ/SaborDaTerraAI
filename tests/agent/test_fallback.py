@@ -803,3 +803,77 @@ def test_prepare_tools_oferece_gerar_relatorio_em_continuacao_de_pedido():
 
     agente.run_sync('e agora o de orgânicos?')
     assert tools_vistas_pelo_modelo[-1] == ['consultar_financeiro']
+
+
+def _agente_com_resumo(passos: list[list[ToolCallPart]], tools_vistas: list[list[str]]) -> Agent:
+    """Agente cujo modelo faz as chamadas de `passos`, uma lista por passo, e depois responde."""
+
+    def resumir_produtor(produtor: str) -> dict:
+        return {'produtor_id': produtor}
+
+    def buscar_documentos(pergunta: str) -> dict:
+        return {'resultados': []}
+
+    def consultar_financeiro(produtor_id: str) -> dict:
+        return {'itens': []}
+
+    def buscar_produtores(produtor_id: str) -> dict:
+        return {'produtores': []}
+
+    def consultar_preco(produto: str) -> dict:
+        return {'precos': []}
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        tools_vistas.append(sorted(t.name for t in info.function_tools))
+        passo = len(tools_vistas) - 1
+        if passo < len(passos):
+            return ModelResponse(parts=passos[passo])
+        return ModelResponse(
+            parts=[ToolCallPart(tool_name='final_result', args={'texto': 'ok'})]
+        )
+
+    return Agent(
+        output_type=RespostaAgente,
+        tools=[resumir_produtor, buscar_documentos, consultar_financeiro, buscar_produtores,
+               consultar_preco],
+        retries=0,
+        capabilities=[
+            construir_capability_fallback([FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)])
+        ],
+    )
+
+
+def test_prepare_tools_oculta_consultas_cobertas_depois_do_resumo():
+    """F4 do Bloco 4: depois de `resumir_produtor`, o modelo não reconsulta o mesmo produtor."""
+    vistas: list[list[str]] = []
+    agente = _agente_com_resumo(
+        [[ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P001'})]], vistas
+    )
+
+    agente.run_sync('Resuma a situação da Maria das Graças')
+
+    todas = ['buscar_documentos', 'buscar_produtores', 'consultar_financeiro',
+             'consultar_preco', 'resumir_produtor']
+    assert vistas[0] == todas
+    # Continua podendo resumir outro produtor e usar o que o resumo não cobre.
+    assert vistas[1] == ['consultar_preco', 'resumir_produtor']
+
+    vistas.clear()
+    agente.run_sync('Qual o preço da goiaba?')  # turno novo: a trava não vaza
+    assert vistas[0] == todas
+
+
+def test_prepare_tools_mantem_consulta_ja_chamada_junto_com_o_resumo():
+    """Se o modelo pediu a consulta no mesmo passo do resumo, ela segue disponível."""
+    vistas: list[list[str]] = []
+    agente = _agente_com_resumo(
+        [[
+            ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P003'}),
+            ToolCallPart(tool_name='consultar_financeiro', args={'produtor_id': 'P003'}),
+        ]],
+        vistas,
+    )
+
+    agente.run_sync('Resuma o Cícero e diga quanto a SuperBom deve a ele')
+
+    assert vistas[1] == ['consultar_financeiro', 'consultar_preco', 'resumir_produtor']

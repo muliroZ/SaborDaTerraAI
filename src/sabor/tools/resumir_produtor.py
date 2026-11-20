@@ -9,7 +9,7 @@ import re
 import unicodedata
 
 import psycopg
-from typing import Annotated
+from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 from pydantic_ai import RunContext
 
@@ -47,6 +47,13 @@ class ResumoProdutorResultado(BaseModel):
     total_vendido_periodo: float = 0.0
     total_pendente: float = 0.0
     total_vencido: float = 0.0
+    certificacao_organica: Literal['vigente', 'vencida', 'sem_validade', 'nao_possui'] | None = (
+        None
+    )
+    """Situação na data de referência: o cadastro sozinho não basta (P008 vencida)."""
+    validade_certificacao: date | None = None
+    registro_sie: str | None = None
+    """Registro sanitário (SIE) da agroindústria; nulo quando não há."""
     pedidos_em_aberto: list[PedidoElegivelResumo] = Field(default_factory=list)
     alertas: list[str] = Field(default_factory=list)
     rascunho: Rascunho | None = None
@@ -175,9 +182,13 @@ def resumir_produtor(
       (ex.: "faz o resumo da Maria das Graças", "qual a situação do P001?",
       "me dá um resumo do meu cadastro").
     - Quando for necessário consolidar vendas de setembro/outubro, valores
-      pendentes/vencidos, pedidos em aberto elegíveis e alertas documentais
-      (certificação orgânica, ADAGRO, SIE, laudos) de uma só vez, já gerando
-      o rascunho de mensagem em `rascunhos` da resposta estruturada.
+      pendentes/vencidos, pedidos em aberto elegíveis, situação da certificação
+      orgânica (vigente, vencida ou não possui, com a validade), registro SIE e
+      alertas documentais (ADAGRO, laudos) de uma só vez, já gerando o rascunho
+      de mensagem.
+    - O resultado já é o panorama completo: não complemente com
+      `buscar_documentos`, `consultar_financeiro` ou `buscar_produtores` sobre o
+      mesmo produtor.
 
     QUANDO NÃO USAR:
     - Para buscar listas de produtores filtrando por município ou produto
@@ -275,6 +286,14 @@ def resumir_produtor(
     cert_vigente = (
         bool(cert_organica) and data_val_efetiva is not None and data_val_efetiva >= data_ref
     )
+
+    if cert_organica or validade_doc_cert is not None:
+        if data_val_efetiva is None:
+            situacao_cert = 'sem_validade'
+        else:
+            situacao_cert = 'vigente' if cert_vigente else 'vencida'
+    else:
+        situacao_cert = 'nao_possui'
 
     if status_prod != 'ativo':
         alertas.append('Cadastro inativo na cooperativa.')
@@ -447,6 +466,9 @@ def resumir_produtor(
         total_vendido_periodo=fin_geral.total_vendido,
         total_pendente=fin_geral.total_pendente,
         total_vencido=fin_geral.total_vencido,
+        certificacao_organica=situacao_cert,
+        validade_certificacao=data_val_efetiva,
+        registro_sie=registro_sie,
         pedidos_em_aberto=pedidos_elegiveis,
         alertas=alertas,
         rascunho=rascunho,

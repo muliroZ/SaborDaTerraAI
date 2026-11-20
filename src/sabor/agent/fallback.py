@@ -185,6 +185,14 @@ _PADRAO_GRUPO_CITACOES_INLINE = re.compile(
     r'(?:\s*(?:,|;|e|\+)?\s*`?\[[^[\]·\n]+?\s*·\s*[^[\]\n]+?\]`?)*'
 )
 
+TOOLS_COBERTAS_PELO_RESUMO = frozenset({
+    'buscar_documentos',
+    'consultar_financeiro',
+    'buscar_produtores',
+})
+"""Consultas que `resumir_produtor` já consolida (cadastro, certificação, SIE, documentos,
+financeiro e pedidos): ficam ocultas no restante do turno depois do resumo."""
+
 _TERMOS_SOLICITACAO_RELATORIO = (
     'relat',
     'levantamento',
@@ -655,7 +663,13 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
         ctx: RunContext[Any],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
-        """Oculta `gerar_relatorio` quando a pergunta não pede relatório/levantamento/dossiê.
+        """Filtra as ferramentas oferecidas ao modelo a cada passo do turno.
+
+        - Oculta `gerar_relatorio` quando a pergunta não pede relatório/levantamento/dossiê.
+        - Depois que `resumir_produtor` roda, oculta as consultas que o resumo já cobre
+          (`TOOLS_COBERTAS_PELO_RESUMO`). O modelo complementava o resumo com elas, e o
+          turno passava de ~9 mil para até ~28 mil tokens, perto do teto de 32 mil (F4 do
+          Bloco 4). `resumir_produtor` continua disponível para resumir outro produtor.
 
         Mantém a lista de ferramentas estável entre os passos do turno (nunca remove uma
         ferramenta que já aparece no histórico `tool_calls` do turno atual).
@@ -666,21 +680,24 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
 
         mensagens = getattr(ctx, 'messages', ()) or ()
         msgs_turno = _mensagens_turno_atual(mensagens)
-        ja_chamada = any(
-            isinstance(part, ToolCallPart) and part.tool_name == 'gerar_relatorio'
+        chamadas = {
+            part.tool_name
             for msg in msgs_turno
             if isinstance(msg, ModelResponse)
             for part in msg.parts
-        )
-        if ja_chamada:
-            return tool_defs
+            if isinstance(part, ToolCallPart)
+        }
 
-        texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
-        anterior = _texto_usuario_turno_anterior(mensagens, msgs_turno)
-        if not mensagem_solicita_relatorio(texto_usuario, anterior):
-            return [t for t in tool_defs if t.name != 'gerar_relatorio']
+        ocultar: set[str] = set()
+        if 'resumir_produtor' in chamadas:
+            ocultar |= TOOLS_COBERTAS_PELO_RESUMO - chamadas
+        if 'gerar_relatorio' not in chamadas:
+            texto_usuario = _extrair_texto_usuario_turno(ctx, msgs_turno)
+            anterior = _texto_usuario_turno_anterior(mensagens, msgs_turno)
+            if not mensagem_solicita_relatorio(texto_usuario, anterior):
+                ocultar.add('gerar_relatorio')
 
-        return tool_defs
+        return [t for t in tool_defs if t.name not in ocultar]
 
     async def prepare_model_request(
         self,
