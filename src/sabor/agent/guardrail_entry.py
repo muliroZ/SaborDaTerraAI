@@ -20,6 +20,10 @@ MENSAGEM_ACESSO_NAO_AUTORIZADO = (
     'apenas as informações da sua própria conta. Para solicitar dados de outro '
     'produtor, procure a equipe da cooperativa.'
 )
+MENSAGEM_SQL_INJECTION = (
+    'Não posso processar comandos destinados a alterar ou manipular o banco de dados. '
+    'Envie apenas o nome, município ou filtro que deseja consultar.'
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,16 @@ PADROES_INJECTION = [
     r"<\s*/?\s*(?:user|system|assistant|tool_return|tool_call|function_call)\b[^>]*>",
     r"<\|im_(?:start|end)\|>",
     r"\[\s*(?:admin\s+override|obs\s+interna\s+do\s+sistema)\b",
+]
+
+# SQL dinâmico não deve ser enviado pelo chat. As consultas das tools usam parâmetros,
+# mas bloquear estes padrões antes do LLM evita que uma tentativa seja tratada como filtro
+# normal e receba uma explicação improvisada do modelo.
+PADROES_SQL_INJECTION = [
+    r"(?:^|[;'\"`])\s*(?:drop|delete|update|insert|alter|truncate|create|grant|revoke)\s+"
+    r"(?:table|database|schema|role|user|from|into|set)\b",
+    r"(?:['\"]\s*)\bor\b\s*['\"]?\s*\d+\s*['\"]?\s*=\s*['\"]?\s*\d+",
+    r"\bunion\s+(?:all\s+)?select\b",
 ]
 
 TERMOS_FORA_ESCOPO = [
@@ -173,6 +187,12 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
         )
 
     texto_lower = texto_limpo.lower()
+
+    if any(re.search(padrao, texto_lower, re.IGNORECASE) for padrao in PADROES_SQL_INJECTION):
+        return RetornoAntecipado(
+            motivo="PROMPT_INJECTION",
+            mensagem=MENSAGEM_SQL_INJECTION,
+        )
 
     for padrao in PADROES_INJECTION:
         if re.search(padrao, texto_lower):
