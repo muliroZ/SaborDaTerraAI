@@ -246,6 +246,31 @@ def criar_retorno_orcamento_turno() -> RetornoAntecipado:
     )
 
 
+def verificar_acesso_produtor(
+    texto: str, perfil: str = 'funcionario', produtor_id: str | None = None
+) -> RetornoAntecipado | None:
+    """Bloqueia antes do LLM consultas de produtor sobre outro produtor identificado por ID."""
+    if perfil != 'produtor' or not produtor_id:
+        return None
+    padroes = (
+        r'\bP\s*0*(\d{1,3})\b',
+        r'\bprodutor(?:a)?\s+(?:id\s*)?0*(\d{1,3})\b',
+    )
+    alvos = set()
+    for padrao in padroes:
+        alvos.update(f'P{int(m):03d}' for m in re.findall(padrao, texto, re.IGNORECASE))
+    if alvos - {produtor_id.upper()}:
+        return RetornoAntecipado(
+            motivo='ACESSO_NAO_AUTORIZADO',
+            mensagem=(
+                'Não posso consultar nem divulgar dados de outros produtores. Você pode acessar '
+                'apenas as informações da sua própria conta. Para solicitar dados de outro '
+                'produtor, procure a equipe da cooperativa.'
+            ),
+        )
+    return None
+
+
 def executar_guardrail_entrada(
     mensagem: str,
     dataset_version: str = "default",
@@ -253,9 +278,14 @@ def executar_guardrail_entrada(
     cache_repo: Optional[Any] = None,
     *,
     perfil: str = "funcionario",
+    produtor_id: str | None = None,
     data_referencia: date | str | None = None,
 ) -> Optional[RetornoAntecipado]:
     """Executa 2a -> 2b -> 2c em sequência. Retorna None se a entrada estiver liberada."""
+    bloqueio = verificar_acesso_produtor(mensagem, perfil, produtor_id)
+    if bloqueio:
+        return bloqueio
+
     bloqueio = verificar_escopo_e_tamanho(mensagem)
     if bloqueio:
         return bloqueio

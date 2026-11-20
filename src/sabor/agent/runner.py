@@ -550,6 +550,7 @@ def processar_turno(
                 requisicoes_na_sessao=contagem_sessao,
                 cache_repo=cache_repo if usar_cache else None,
                 perfil=perfil_turno,
+                produtor_id=_resolver_usuario(usuario).produtor_id,
                 data_referencia=data_ref_turno,
             )
 

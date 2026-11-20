@@ -84,6 +84,7 @@ class Destaque:
 
 
 ROTULOS_RETORNO: dict[str, Destaque] = {
+    'ACESSO_NAO_AUTORIZADO': Destaque('warning', 'Acesso não autorizado', ':material/lock:'),
     'FORA_DE_ESCOPO': Destaque('info', 'Fora de escopo', ':material/explore_off:'),
     'PROMPT_INJECTION': Destaque('warning', 'Mensagem bloqueada', ':material/gpp_bad:'),
     'ENTRADA_VAZIA': Destaque('info', 'Mensagem vazia', ':material/edit_off:'),
