@@ -64,6 +64,14 @@ def _formatar_quantidade_item(item: Item) -> str:
     return qtd_str
 
 
+def _descrever_item(item: Item) -> str:
+    """Descreve o item como "40 kg de banana prata" (só o produto, se faltar quantidade)."""
+    produto = item.produto or item.produto_texto
+    if item.quantidade is None:
+        return produto
+    return f"{_formatar_quantidade_item(item)} de {produto}"
+
+
 def _formatar_entrega(pedido: Pedido) -> str:
     """Formata prazo de entrega sem nunca usar `data_recebimento` como substituto."""
     entrega = getattr(pedido, "entrega", None)
@@ -270,12 +278,30 @@ async def rascunhar_notificacao(
 
     capacidades_produto: dict[str, float | None] = {}
     alocacoes_por_produtor: dict[str, list[dict[str, Any]]] = {}
+    # Itens que não entram em nenhum rascunho: a equipe precisa saber deles (F2 do Bloco 4).
+    nao_alocados: list[str] = []
 
     for item in pedido.itens:
         if getattr(item, "ambiguo", False):
+            motivo = "produto ambíguo, confirmar com o comprador qual é"
+            if item.observacao:
+                motivo += f" ({item.observacao})"
+            nao_alocados.append(f"{_descrever_item(item)}: {motivo}")
+            flags_obj.append(Flag(
+                tipo="ambiguidade",
+                descricao=f"Item não alocado, produto ambíguo: {_descrever_item(item)}.",
+            ))
             continue
         elegiveis = list(getattr(item, "produtores_elegiveis", None) or [])
         if not elegiveis:
+            nao_alocados.append(
+                f"{_descrever_item(item)}: nenhum produtor elegível "
+                "(safra, capacidade, certificação ou registro sanitário)"
+            )
+            flags_obj.append(Flag(
+                tipo="sem_produtor_elegivel",
+                descricao=f"Item sem produtor elegível: {_descrever_item(item)}.",
+            ))
             continue
 
         nome_produto = item.produto or item.produto_texto
@@ -347,11 +373,18 @@ async def rascunhar_notificacao(
     comprador_exibicao = pedido.comprador.nome or comprador_nome or "Comprador Geral"
     comprador_seguro = _mascarar_se_possivel(ctx, comprador_exibicao)
 
+    secao_nao_alocados = (
+        "\n\n**Itens sem alocação (decisão da equipe antes de responder ao comprador):**\n"
+        + "\n".join(f"- {linha}" for linha in nao_alocados)
+        if nao_alocados
+        else ""
+    )
+
     if not alocacoes_por_produtor:
         msg_sem_elegiveis = (
             f"O pedido {pedido.pedido_id} ({comprador_seguro}) não possui produtores "
             "elegíveis ativos que atendam aos critérios sanitários e de safra exigidos."
-        )
+        ) + secao_nao_alocados
         if tem_inadimplencia:
             msg_sem_elegiveis += (
                 " ATENÇÃO: Há sinalização de inadimplência para o comprador; "
@@ -452,6 +485,7 @@ async def rascunhar_notificacao(
     texto_final = _mascarar_se_possivel(
         ctx,
         "\n".join(resumo_partes)
+        + secao_nao_alocados
         + "\n\nOs rascunhos de notificação foram gerados abaixo para revisão da equipe "
         "(sistema read-only, nenhum envio automático foi realizado).",
     )

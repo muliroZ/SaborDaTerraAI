@@ -573,3 +573,44 @@ async def test_integracao_postgres_matriz_exclui_p008_e_p017(conn):
     assert not any("P017" in d for d in dests_006)
     assert any(f.tipo == "inadimplencia" for f in res_006.flags)
     assert "validação da gestão" in res_006.texto.lower()
+
+
+@pytest.mark.anyio
+async def test_itens_nao_alocados_aparecem_no_texto_e_nas_flags():
+    """F2 do Bloco 4: item ambíguo ou sem produtor elegível não some em silêncio."""
+    pedido = Pedido(
+        pedido_id="PED-2026-002",
+        tipo="compra_recorrente",
+        comprador=Comprador(nome="Mercado Bom Preço"),
+        entrega=Entrega(data=date(2026, 11, 3), data_texto="terça 03/11"),
+        itens=[
+            Item(produto_texto="goiaba", produto="goiaba", quantidade=50.0, unidade="kg",
+                 produtores_elegiveis=["P001"]),
+            Item(produto_texto="manteiga", quantidade=5.0, unidade="kg", ambiguo=True,
+                 observacao="manteiga de garrafa ou queijo manteiga"),
+            Item(produto_texto="cajá", produto="cajá", quantidade=10.0, unidade="kg"),
+        ],
+    )
+    conn = _ConexaoPsycopgFalsa(
+        pedidos_rows={
+            "PED-2026-002": ("PED-2026-002", "compra", "Mercado Bom Preço", "pedido",
+                             datetime(2026, 10, 27, 9, 0)),
+        },
+        nomes_produtores={"P001": "Maria Silva"},
+    )
+    ctx = _ctx(conn=conn)
+
+    with patch(
+        "sabor.tools.rascunhar_notificacao.extrair_e_classificar",
+        new=AsyncMock(return_value=pedido),
+    ):
+        res = await rascunhar_notificacao(ctx, pedido_id="PED-2026-002")
+
+    assert [r.destinatario for r in res.rascunhos] == ["Maria Silva (P001)"]
+    assert "Itens sem alocação" in res.texto
+    assert "5 kg de manteiga: produto ambíguo" in res.texto
+    assert "manteiga de garrafa ou queijo manteiga" in res.texto
+    assert "10 kg de cajá: nenhum produtor elegível" in res.texto
+    descricoes = {f.tipo: f.descricao for f in res.flags if "Item" in f.descricao}
+    assert "5 kg de manteiga" in descricoes["ambiguidade"]
+    assert "10 kg de cajá" in descricoes["sem_produtor_elegivel"]

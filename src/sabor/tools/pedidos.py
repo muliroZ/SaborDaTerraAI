@@ -275,7 +275,20 @@ def normalizar_pedido(pedido: Pedido, catalogo: Catalogo, recebido_em: date) -> 
         entrega.data_estimada = entrega.data
 
     for item in pedido.itens:
-        if item.ambiguo or item.produto_id is not None:
+        if item.produto_id is not None:
+            continue
+        if item.ambiguo:
+            # O LLM às vezes marca como ambíguo um nome que está no catálogo, como "banana
+            # prata" (sinônimo de banana). Só o nome ou sinônimo exato desfaz a marcação:
+            # "manteiga", "mel variado" e "o de sempre" continuam ambíguos.
+            produto = catalogo.resolver_exato(item.produto_texto) if item.produto is None else None
+            if produto is not None:
+                item.produto_id, item.produto, item.ambiguo = produto.id, produto.nome, False
+                # A observação da extração pode ter outra informação ("fornecimento semanal").
+                nota = f'Identificado no catálogo como {produto.nome}.'
+                if item.observacao:
+                    nota = f'{nota} Nota da extração: {item.observacao}'
+                item.observacao = nota
             continue
         produto = catalogo.resolver(item.produto, item.produto_texto)
         if produto is None:

@@ -85,3 +85,22 @@ def test_ignora_sinonimo_de_produto_inexistente():
 
     assert catalogo.resolver('guava') is None
     assert catalogo.nomes() == ['goiaba']
+
+
+@pytest.mark.parametrize(
+    'texto,esperado',
+    [
+        ('mel', 'mel silvestre'),  # sinônimo cadastrado
+        ('Manga Tommy', 'manga'),
+        ('maracuja', 'maracujá'),
+        ('frango', None),  # só o passo 3 (palavras) resolve
+        ('mel (aquele silvestre mesmo)', None),  # só o passo 2 resolve
+        ('manteiga', None),
+        ('mel variado', None),
+        (None, None),
+    ],
+)
+def test_resolver_exato_usa_so_nome_ou_sinonimo(catalogo, texto, esperado):
+    produto = catalogo.resolver_exato(texto)
+
+    assert (produto.nome if produto else None) == esperado

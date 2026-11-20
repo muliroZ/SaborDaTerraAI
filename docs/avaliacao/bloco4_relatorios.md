@@ -22,7 +22,7 @@ Legenda: ✅ atende ao esperado no PDF · ⚠️ atende ao esperado, mas com def
 | REL-05 | Relatório de contas a receber | ✅ | Chama `gerar_relatorio('contas_a_receber')` e anexa `contas_a_receber_20261030.md`. O texto traz R$ 8.690 vencidos, R$ 4.690 a vencer e R$ 13.380 no total, sem colar o Markdown. Tabelas conferidas linha a linha. |
 | REL-06 | Levantamento de orgânicos vigentes para baixar | ✅ | Chama `gerar_relatorio('organicos_vigentes')` e anexa o `.md` com 8 produtores vigentes. P008 fica fora e aparece na seção "Atenção". |
 | REL-07 | Dossiê ADAGRO do PED-2026-014 | ✅ | Anexa `dossie_adagro_PED-2026-014_20261030.md` com o que foi pedido, o que existe e o que falta, item a item. Confere com `docs/fontes/pedidos.md` (8 vigentes, laudos só de P002/P003, 3 lotes só de queijo coalho e mel, NC-001 descumprida, NC-002 sem evidência). |
-| REL-08 | Rascunhos para os elegíveis do PED-2026-002 | ⚠️ | O bug `ctx: Any` citado no PDF **já foi corrigido** (`a698246`) e a tool roda. Mas a banana prata (40 kg) some sem aviso ([F2](#f2)), e o LLM reescreve os rascunhos da tool, inventando itens e afirmações ([F3](#f3), resolvido). |
+| REL-08 | Rascunhos para os elegíveis do PED-2026-002 | ⚠️ | O bug `ctx: Any` citado no PDF **já foi corrigido** (`a698246`) e a tool roda. Mas a banana prata (40 kg) some sem aviso ([F2](#f2), resolvido), e o LLM reescreve os rascunhos da tool, inventando itens e afirmações ([F3](#f3), resolvido). |
 
 **Placar para a apresentação:** 3 ✅ / 4 ⚠️ / 1 ❌. Pelo critério estrito do PDF, são **7/8**: só o REL-04 deixa de cumprir um item explícito. Os ⚠️ cumprem o que o PDF pede, mas têm defeitos que aparecem numa demo.
 
@@ -73,6 +73,30 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 - **Correção sugerida:**
   - Tentar o `resolver` também nos itens que o LLM marcou como ambíguos, quando `produto` vier nulo e `produto_texto` bater exatamente com um sinônimo. Referências ao histórico ("o de sempre") continuam ambíguas, porque não batem com nenhum sinônimo.
   - Fazer `rascunhar_notificacao` listar os itens não alocados, com o motivo.
+
+**Status: resolvido** nas duas camadas que davam o sumiço.
+
+- **Catálogo (camadas 1 e 2).** `normalizar_pedido` (`src/sabor/tools/pedidos.py`) agora tenta `Catalogo.resolver_exato` nos itens que o LLM marcou como ambíguos sem indicar produto.
+  - Só o nome ou sinônimo exato desfaz a marcação. A correspondência por palavras ("frango" → frango caipira) não vale aqui, para não adivinhar o que o LLM considerou incerto.
+  - "manteiga", "mel variado", "frutas variadas" e "o queijo da última vez" continuam ambíguos.
+  - A observação original fica preservada depois de "Identificado no catálogo como X.", porque pode trazer outra informação, como "Fornecimento semanal".
+- **Rascunhos (camada 3).** `rascunhar_notificacao` lista os itens ambíguos e os sem produtor elegível numa seção "Itens sem alocação", com o motivo, e cria uma flag para cada um (`ambiguidade` ou `sem_produtor_elegivel`).
+- **Testes:**
+  - `test_resolver_exato_usa_so_nome_ou_sinonimo` (catálogo);
+  - `test_item_que_o_modelo_marcou_ambiguo_resolve_por_nome_ou_sinonimo_exato` (banana prata, Mel puro, manteiga, frango);
+  - `test_itens_nao_alocados_aparecem_no_texto_e_nas_flags`.
+
+  Os 10 casos falham sem a correção.
+- **Validação no banco de desenvolvimento:** a reclassificação sem LLM resolveu 3 itens:
+  - "banana prata" → banana (P006), no PED-002;
+  - "tapioca/goma" → tapioca (P013), no PED-007;
+  - "Mel puro" → mel silvestre (P002), no PED-009.
+- **Validação com o agente:**
+  - No REL-08 (3 rodadas), o rascunho da P006 traz "40 kg de banana; 25 kg de maracujá".
+  - No PED-2026-007, a tool lista mel variado (ambíguo), frango caipira e ovos caipira (sem produtor elegível), e o texto do modelo repassa isso à equipe.
+- **Pontos que ficam em aberto:**
+  - "tapioca/goma" e "Mel puro" agora são resolvidos pelos sinônimos cadastrados (`tapioca/goma → tapioca`, `mel puro → mel silvestre`). Se a equipe não concordar com esses sinônimos, o ajuste é na tabela, não no código.
+  - A unidade não vai para o plural ("30 dúzia"), um detalhe de `_formatar_quantidade_item` que já existia.
 
 ### F3
 
