@@ -15,6 +15,12 @@ from pydantic_ai.usage import UsageLimits
 from sabor.agent.cache import gerar_chave_cache
 from sabor.agent.schemas import RetornoAntecipado
 
+MENSAGEM_ACESSO_NAO_AUTORIZADO = (
+    'Não posso consultar nem divulgar dados de outros produtores. Você pode acessar '
+    'apenas as informações da sua própria conta. Para solicitar dados de outro '
+    'produtor, procure a equipe da cooperativa.'
+)
+
 logger = logging.getLogger(__name__)
 
 MENSAGEM_ESCOPO_AMIGAVEL = (
@@ -262,11 +268,7 @@ def verificar_acesso_produtor(
     if alvos - {produtor_id.upper()}:
         return RetornoAntecipado(
             motivo='ACESSO_NAO_AUTORIZADO',
-            mensagem=(
-                'Não posso consultar nem divulgar dados de outros produtores. Você pode acessar '
-                'apenas as informações da sua própria conta. Para solicitar dados de outro '
-                'produtor, procure a equipe da cooperativa.'
-            ),
+            mensagem=MENSAGEM_ACESSO_NAO_AUTORIZADO,
         )
     return None
 

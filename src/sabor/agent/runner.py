@@ -50,6 +50,7 @@ from sabor.agent.fallback import (
     limpar_citacoes_inline_texto,
 )
 from sabor.agent.guardrail_entry import (
+    MENSAGEM_ACESSO_NAO_AUTORIZADO,
     criar_retorno_orcamento_turno,
     executar_guardrail_entrada,
     obter_usage_limits_turno,
@@ -67,7 +68,7 @@ from sabor.agent.schemas import (
 )
 from sabor.db import conectar_readonly
 from sabor.observabilidade import instrumentar_turno
-from sabor.tools.base import _resolver_usuario
+from sabor.tools.base import SemPermissao, _resolver_usuario
 
 logger = logging.getLogger(__name__)
 
@@ -625,6 +626,25 @@ def processar_turno(
             message_history=historico,
             usage_limits=limites_exec,
         )
+    except SemPermissao:
+        # Uma tool pode descobrir a violação apenas durante a consulta (por exemplo,
+        # ao resolver o nome de outro produtor). Não exponha a mensagem técnica da
+        # exceção, que pode conter IDs, nem classifique a recusa como falha do provedor.
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        retorno_acesso = RetornoAntecipado(
+            motivo='ACESSO_NAO_AUTORIZADO',
+            mensagem=MENSAGEM_ACESSO_NAO_AUTORIZADO,
+        )
+        turno_acesso = RespostaTurno(
+            sessao_id=sessao_id,
+            usuario=usuario,
+            texto=retorno_acesso.mensagem,
+            bloqueado_guardrail=True,
+            retorno_antecipado=retorno_acesso,
+            latencia_ms=latencia_ms,
+        )
+        persistir_e_auditar(turno_acesso)
+        return turno_acesso
     except UsageLimitExceeded as exc:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
         logger.warning(
