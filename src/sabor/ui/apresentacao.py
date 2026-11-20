@@ -95,6 +95,9 @@ ROTULOS_RETORNO: dict[str, Destaque] = {
         'warning', 'Limite do turno atingido', ':material/hourglass_disabled:'
     ),
     'SEM_PERMISSAO': Destaque('warning', 'Acesso restrito', ':material/lock:'),
+    'PROVEDORES_INDISPONIVEIS': Destaque(
+        'warning', 'Provedores temporariamente indisponíveis', ':material/hourglass_top:'
+    ),
 }
 
 DESTAQUE_FALHA_SEGURA = Destaque('error', 'Falha segura', ':material/cloud_off:')

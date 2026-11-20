@@ -43,6 +43,7 @@ from sabor.agent.cache import (
 from sabor.agent.deps import AgentDeps, obter_data_referencia, obter_versao_dataset
 from sabor.agent.fallback import (
     _PADRAO_CITACAO_FONTE_PONTO,
+    TodosModelosEmCooldown,
     construir_capability_fallback,
     extrair_metadados_resposta,
     extrair_tentativas_de_excecao,
@@ -50,7 +51,6 @@ from sabor.agent.fallback import (
     limpar_citacoes_inline_texto,
 )
 from sabor.agent.guardrail_entry import (
-    MENSAGEM_ACESSO_NAO_AUTORIZADO,
     criar_retorno_orcamento_turno,
     executar_guardrail_entrada,
     obter_usage_limits_turno,
@@ -913,25 +913,30 @@ def processar_turno(
             message_history=historico,
             usage_limits=limites_exec,
         )
-    except SemPermissao:
-        # Uma tool pode descobrir a violação apenas durante a consulta (por exemplo,
-        # ao resolver o nome de outro produtor). Não exponha a mensagem técnica da
-        # exceção, que pode conter IDs, nem classifique a recusa como falha do provedor.
+    except TodosModelosEmCooldown as exc:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
-        retorno_acesso = RetornoAntecipado(
-            motivo='ACESSO_NAO_AUTORIZADO',
-            mensagem=MENSAGEM_ACESSO_NAO_AUTORIZADO,
+        logger.warning(
+            'Todos os provedores em cooldown; aguardar=%ss sessao=%s',
+            exc.retry_after_s,
+            sessao_id,
         )
-        turno_acesso = RespostaTurno(
+        retorno_provedores = RetornoAntecipado(
+            motivo='PROVEDORES_INDISPONIVEIS',
+            mensagem=(
+                'Os provedores de IA estão temporariamente indisponíveis. '
+                f'Tente novamente em aproximadamente {exc.retry_after_s} segundos.'
+            ),
+        )
+        turno_provedores = RespostaTurno(
             sessao_id=sessao_id,
             usuario=usuario,
-            texto=retorno_acesso.mensagem,
+            texto=retorno_provedores.mensagem,
             bloqueado_guardrail=True,
-            retorno_antecipado=retorno_acesso,
+            retorno_antecipado=retorno_provedores,
             latencia_ms=latencia_ms,
         )
-        persistir_e_auditar(turno_acesso)
-        return turno_acesso
+        persistir_e_auditar(turno_provedores)
+        return turno_provedores
     except UsageLimitExceeded as exc:
         latencia_ms = int((time.perf_counter() - inicio) * 1000)
         logger.warning(
