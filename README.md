@@ -13,7 +13,10 @@ uv run python scripts/init_db.py  # cria o schema vazio (idempotente)
 uv run python scripts/etl.py      # insere os dados nas tabelas correspondentes (idempotente)
 uv run python scripts/etl.py      # executa o ETL completo, populando as tabelas 
 uv run python scripts/ingest_docs.py # ingere documentos, gera embeddings, completa as tabelas
+uv run python scripts/triagem_lote.py # extrai os itens dos pedidos (LLM) para `pedido_itens`
 ```
+
+- O ETL esvazia `pedidos` e, em cascata, a triagem e os itens. Rode a triagem depois de cada carga: o resumo por produtor lista os pedidos em aberto a partir de `pedido_itens`.
 
 - `uv run python scripts/init_db.py --reset` apaga as tabelas do projeto e recria o schema do zero.
 - `uv run python scripts/etl.py` apaga os dados das tabelas e reseta os indices seriais.

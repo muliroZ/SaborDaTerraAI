@@ -57,7 +57,7 @@ class ModeloFalso:
 
 @pytest.fixture
 def conn(conn_temporaria):
-    conn_temporaria.execute('TRUNCATE pedidos, financeiro, produtores CASCADE')
+    conn_temporaria.execute('TRUNCATE pedidos, financeiro, produtores, produtos CASCADE')
     conn_temporaria.cursor().executemany(
         'INSERT INTO pedidos (id, data_recebimento, canal, remetente, mensagem_original) '
         'VALUES (%s, %s, %s, %s, %s)',
@@ -255,6 +255,88 @@ def test_falha_definitiva_nao_derruba_o_lote(conn, modelo, monkeypatch):
     assert sorted(resultado.processados) == ['PED-T-001', 'PED-T-003']
     assert 'ModelRateLimitError' in resultado.erros['PED-T-002']
     assert [f['pedido_id'] for f in listar_fila(conn)][-1] == 'PED-T-002'  # erro no fim da fila
+
+
+def _itens(conn, pedido_id):
+    return conn.execute(
+        'SELECT ordem, produto_texto, produto_id, quantidade, unidade, opcional, ambiguo '
+        'FROM pedido_itens WHERE pedido_id = %s ORDER BY ordem',
+        (pedido_id,),
+    ).fetchall()
+
+
+def test_itens_da_triagem_vao_para_pedido_itens_e_saem_com_erro(conn, modelo, monkeypatch):
+    _triar(conn)
+    # Catálogo vazio: o item fica ambíguo e sem produto_id, mas é gravado.
+    assert _itens(conn, 'PED-T-003') == [(1, 'mel', None, 10, 'kg', False, True)]
+    assert _itens(conn, 'PED-T-002') == []  # notificação sem itens
+
+    _triar(conn)  # reclassificação sem LLM substitui os itens, sem duplicar
+    assert len(_itens(conn, 'PED-T-003')) == 1
+
+    async def quebra(deps, mensagem, **kwargs):
+        raise ValueError('extração inválida')
+
+    monkeypatch.setattr(triagem, 'extrair_pedido', quebra)
+    resultado = _triar(conn, reprocessar=True)
+
+    assert 'PED-T-003' in resultado.erros
+    assert _itens(conn, 'PED-T-003') == []  # sem triagem válida, sem itens
+
+
+def test_resumo_do_produtor_mostra_os_itens_triados(conn, modelo, monkeypatch):
+    """F1 do Bloco 4: o resumo do produtor lê os pedidos em aberto que a triagem gravou."""
+    from pydantic_ai import RunContext
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.usage import RunUsage
+
+    from sabor.tools.resumir_produtor import resumir_produtor
+
+    queijo, ricota = (
+        conn.execute(
+            'INSERT INTO produtos (nome, unidade, origem_animal) VALUES (%s, %s, true) '
+            'RETURNING id',
+            (nome, 'kg'),
+        ).fetchone()[0]
+        for nome in ('queijo coalho', 'ricota')
+    )
+    conn.cursor().executemany(
+        'INSERT INTO produtores (id, nome_completo, municipio, status, registro_sie) '
+        'VALUES (%s, %s, %s, %s, %s)',
+        [
+            ('P003', 'Cícero Teste', 'Caetés', 'ativo', 'PE-SIE-0756'),
+            ('P011', 'Sem SIE Teste', 'Garanhuns', 'ativo', None),
+        ],
+    )
+    conn.cursor().executemany(
+        'INSERT INTO produtor_produtos (produtor_id, nome_original, produto_id) VALUES (%s, %s, %s)',
+        [('P003', 'queijo coalho', queijo), ('P003', 'ricota', ricota), ('P011', 'queijo', queijo)],
+    )
+    monkeypatch.setitem(EXTRACOES, 'COMPRA', {
+        'tipo': 'compra',
+        'comprador': {'nome': 'Restaurante Raízes'},
+        'entrega': {'data_texto': 'terça 03/11'},
+        'itens': [
+            {'produto_texto': 'queijo coalho', 'quantidade': 30, 'unidade': 'kg'},
+            {'produto_texto': 'ricota', 'quantidade': 5, 'unidade': 'kg', 'opcional': True},
+            {'produto_texto': 'aquele queijo da última vez', 'quantidade': 15,
+             'unidade': 'kg', 'ambiguo': True},
+        ],
+    })
+    _triar(conn)
+
+    deps = _deps(conn)
+    ctx = RunContext(deps=deps, model=TestModel(), usage=RunUsage())
+    cicero = resumir_produtor(ctx, 'P003')
+
+    assert [(p.pedido_id, p.produto, p.quantidade) for p in cicero.pedidos_em_aberto] == [
+        ('PED-T-003', 'queijo coalho', 30.0),
+        ('PED-T-003', 'ricota', 5.0),
+    ]
+    assert cicero.pedidos_em_aberto[0].data_entrega == date(2026, 11, 3)
+    assert 'PED-T-003: queijo coalho — 30 kg (entrega em 03/11)' in cicero.rascunho.conteudo
+    # Origem animal sem SIE: o pedido não é oferecido ao produtor.
+    assert resumir_produtor(ctx, 'P011').pedidos_em_aberto == []
 
 
 def test_exporta_csv_e_json_sem_remetente(conn, modelo):

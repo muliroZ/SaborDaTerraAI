@@ -331,28 +331,33 @@ def resumir_produtor(
         if 'laudo' not in tipos_docs_presentes:
             alertas.append('Laudo sanitário/veterinário faltando na pasta documental.')
 
-    # 4. Pedidos em aberto com os produtos do produtor, filtrados por elegibilidade
+    # 4. Pedidos em aberto com os produtos do produtor, filtrados por elegibilidade.
+    # Os itens vêm da triagem (`sabor.triagem` grava `pedido_itens`), assim como o tipo e a data
+    # de entrega: as colunas extraídas de `pedidos` não são preenchidas pela carga. Itens
+    # ambíguos ficam de fora, porque ainda não se sabe qual produto o comprador quer.
     pedidos_elegiveis: list[PedidoElegivelResumo] = []
     if status_prod == 'ativo':
         linhas_pedidos = conn.execute(
             """
             SELECT DISTINCT
                 p.id,
-                COALESCE(p.comprador_normalizado, p.comprador) AS comprador,
-                p.data_entrega,
+                COALESCE(p.comprador_normalizado, p.comprador, t.comprador) AS comprador,
+                COALESCE(t.data_entrega, p.data_entrega) AS data_entrega,
                 pr.nome AS produto_nome,
                 pi.quantidade,
                 pi.unidade,
                 pi.organico,
                 pr.origem_animal
             FROM pedidos p
+            JOIN triagem_pedidos t ON t.pedido_id = p.id AND t.status = 'ok'
             JOIN pedido_itens pi ON pi.pedido_id = p.id
             JOIN produtor_produtos pp ON pp.produto_id = pi.produto_id
             JOIN produtos pr ON pr.id = pi.produto_id
             WHERE pp.produtor_id = %s
               AND p.status = 'pendente'
-              AND COALESCE(p.tipo, 'compra') IN ('compra', 'compra_recorrente', 'cotacao')
-            ORDER BY p.data_entrega NULLS LAST, p.id, pr.nome
+              AND NOT pi.ambiguo
+              AND COALESCE(t.tipo, p.tipo, 'compra') IN ('compra', 'compra_recorrente', 'cotacao')
+            ORDER BY data_entrega NULLS LAST, p.id, pr.nome
             """,
             (prod_id,),
         ).fetchall()

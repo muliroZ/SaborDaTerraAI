@@ -15,7 +15,7 @@ pedidos ──► triar_lote ──► extrair_e_classificar (LLM #9 + regras #1
 | Extração separada em etapa do LLM (`extrair_pedido`, com `usage`/`usage_limits`) e etapa determinística (`classificar_extracao`) | `src/sabor/tools/pedidos.py` (a tool `extrair_e_classificar_pedido` chama as duas) |
 | Lote, orçamento, novas tentativas, fila e exportação | `src/sabor/triagem.py` |
 | Linha de comando | `scripts/triagem_lote.py` |
-| Tabela | `triagem_pedidos` em `src/sabor/sql/schema.sql` |
+| Tabelas | `triagem_pedidos` e `pedido_itens` em `src/sabor/sql/schema.sql` |
 | Interface | botão "Caixa de entrada" na barra lateral (só equipe) em `src/sabor/ui/app.py` |
 
 ## Decisões
@@ -26,6 +26,7 @@ pedidos ──► triar_lote ──► extrair_e_classificar (LLM #9 + regras #1
 - **Orçamento (#32).** Cada pedido roda com `UsageLimits` iguais aos do turno do chat (`TURNO_TOKENS_LIMIT`, `TURNO_REQUEST_LIMIT`). O lote tem teto próprio (`TRIAGEM_TOKENS_LIMIT` ou `--tokens`): quando o restante do lote é menor que o teto do pedido, ele vira o limite do pedido. Ao esgotar, o lote para e o restante fica pendente para a próxima execução. Estourar o limite de **chamadas** de um pedido (ex.: o modelo errou o formato da saída várias vezes) marca só aquele pedido como erro; o lote segue. No dataset de referência, cada pedido gasta ~1,2 mil tokens (15 pedidos ≈ 17 mil).
 - **Falhas.** Erros temporários do provedor (429 do plano gratuito do Gemini, 503, conexão) esperam e tentam de novo (20 s, 40 s, 60 s, ou o `retry_after` que o provedor informar, até 2 min). Qualquer outra falha marca o pedido como `erro` e o lote segue; a próxima execução tenta de novo.
 - **Gravação incremental.** Cada pedido é gravado assim que termina (autocommit): interromper o lote não perde trabalho.
+- **Itens em `pedido_itens`.** `pedidos.json` só traz a mensagem em texto livre, então a carga (ETL) não tem como preencher `pedido_itens`. Quem preenche é a triagem: cada gravação de `triagem_pedidos` substitui os itens do pedido na mesma transação, e um erro os apaga. Assim, a tabela só tem itens de pedidos com triagem válida. O `resumir_produtor` (#11) lê dela os pedidos em aberto de cada produtor, sem os itens ambíguos. Como o ETL faz `TRUNCATE pedidos ... CASCADE`, que também esvazia `triagem_pedidos` e `pedido_itens`, rode a triagem depois de cada carga.
 - **LGPD.** A mensagem passa pelo mascarador antes do LLM, como no chat (#33). A exportação não inclui `remetente` (e-mail/telefone).
 - **CSV injection.** Campos vêm de mensagens de terceiros: no CSV, células que começariam com `=`, `+`, `-`, `@`, tab ou CR ganham um `'` na frente e não viram fórmula no Excel.
 - **Ordem da fila.** Urgência → data de entrega → recebimento. Depois vêm os pedidos com erro, os desatualizados e os pendentes, e a interface avisa quantos estão sem triagem válida.
