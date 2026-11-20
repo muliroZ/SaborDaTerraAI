@@ -2423,7 +2423,10 @@ name = "sabor"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "google-auth", extra = ["requests"] },
     { name = "google-genai" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
     { name = "pandas" },
     { name = "pgvector" },
     { name = "psycopg", extra = ["binary"] },
@@ -2441,7 +2444,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "google-auth", extras = ["requests"], specifier = ">=2.62.2" },
     { name = "google-genai", specifier = ">=2.34.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45.2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45.2" },
     { name = "pandas", specifier = ">=3.1.1" },
     { name = "pgvector", specifier = ">=0.5.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.9" },

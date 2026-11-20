@@ -34,6 +34,7 @@ from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor import triagem
 from sabor.db import conectar, conectar_readonly
+from sabor.observabilidade import configurar_observabilidade
 from sabor.ui import apresentacao as ap
 from sabor.agent.relatorio_conversa import FUSO, relatorio_da_sessao
 
@@ -85,6 +86,8 @@ def conexao() -> Iterator[psycopg.Connection]:
 
 @st.cache_resource(show_spinner=False)
 def agente():
+    # Uma vez por processo, antes do primeiro turno: traces no Cloud Trace (#39).
+    configurar_observabilidade()
     return criar_agente()
 
 

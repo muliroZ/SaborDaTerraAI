@@ -63,4 +63,4 @@ docker compose --profile app run --rm app python scripts/ingest_docs.py
 docker compose --profile app up -d   # http://localhost:8501 (APP_PORT no .env muda a porta)
 ```
 
-O mapeamento local → GCP (Cloud Run + Cloud SQL + Secret Manager) e o passo a passo do deploy opcional estão em [docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md).
+O mapeamento local → GCP (Cloud Run + Cloud SQL + Secret Manager) e o passo a passo do deploy, executado em 19/11/2026, estão em [docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md).

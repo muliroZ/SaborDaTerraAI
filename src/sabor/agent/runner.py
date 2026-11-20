@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+import contextvars
 import inspect
 import json
 import logging
@@ -65,6 +66,7 @@ from sabor.agent.schemas import (
     TentativaFallback,
 )
 from sabor.db import conectar_readonly
+from sabor.observabilidade import instrumentar_turno
 from sabor.tools.base import _resolver_usuario
 
 logger = logging.getLogger(__name__)
@@ -312,7 +314,10 @@ def _executar_com_prazo(
         return await asyncio.wait_for(agente.run(mensagem, **kwargs), timeout=prazo_s)
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sabor-turno')
-    futuro: Future[Any] = executor.submit(lambda: asyncio.run(_rodar()))
+    # A thread não herda os contextvars: sem a cópia, os spans do PydanticAI ficariam fora do
+    # trace do turno (#39).
+    contexto = contextvars.copy_context()
+    futuro: Future[Any] = executor.submit(contexto.run, lambda: asyncio.run(_rodar()))
     abandonado = False
     fechar_lock = threading.Lock()
     fechado = False
@@ -438,6 +443,7 @@ def _cache_aplicavel(
     return not historico or pergunta_autocontida(mensagem)
 
 
+@instrumentar_turno
 def processar_turno(
     sessao_id: str,
     mensagem: str,
