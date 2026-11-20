@@ -18,8 +18,16 @@ TERMOS_FACTUAIS = (
 )
 
 PADROES_AFIRMACAO_COMERCIAL = (
-    r'\b(confirmamos|confirmar|confirmad[ao]|disponivel|pronta\s+entrega|fornecimento\s+liberado)\b',
-    r'\b(podemos|vamos|iremos)\s+(vender|entregar|fornecer|disponibilizar|atender)\b',
+    r'\b(confirmamos|confirmar|confirmad[ao]s?|disponive(?:l|is)|pronta\s+entrega|'
+    r'fornecimento\s+liberado|separad[oa]s?|despachad[oa]s?|encaminhad[oa]s?|enviad[oa]s?)\b',
+    r'\b(podemos|vamos|iremos)\s+'
+    r'(vender|entregar|fornecer|disponibilizar|atender|enviar|despachar)\b',
+    r'\b(sera|serao|vai|vao|esta|estao)\s+(?:sendo\s+)?'
+    r'(entregues?|enviad[oa]s?|fornecid[oa]s?|disponibilizad[oa]s?|'
+    r'liberado[s]?|despachad[oa]s?|separad[oa]s?)\b',
+    r'\b(segue|seguem|seguira|seguirao)\s+'
+    r'(?:no\s+caminhao|para\s+entrega|em\s+transporte|'
+    r'amanha|hoje|domingo|segunda|terca|quarta|quinta|sexta|sabado)\b',
 )
 
 PADROES_AFIRMACAO_ORGANICO_VIGENTE = (
@@ -35,8 +43,11 @@ _MARCADORES_RESTRICAO_INSPECAO = (
 
 _REGEX_NEGACAO_COMERCIAL = re.compile(
     r'\b(?:nao|nunca|jamais)\s+'
-    r'(?:podemos|vamos|iremos|ha|tem|esta|e)?\s*'
-    r'(?:vender|entregar|fornecer|disponibilizar|atender|confirmar|confirmad[ao]|disponivel)\b'
+    r'(?:podemos|pode|podem|vamos|iremos|ha|tem|esta|estao|e|sao|sera|serao|vai|vao|foi|foram)?\s*'
+    r'(?:ser\s+)?'
+    r'(?:vender|entregar|fornecer|disponibilizar|atender|enviar|despachar|confirmar|'
+    r'confirmad[ao]s?|disponive(?:l|is)|entregues?|enviad[oa]s?|fornecid[oa]s?|'
+    r'disponibilizad[oa]s?|liberado[s]?|separad[oa]s?|despachad[oa]s?|encaminhad[oa]s?)\b'
 )
 
 _REGEX_NEGACAO_VIGENCIA = re.compile(

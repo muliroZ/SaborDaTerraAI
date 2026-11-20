@@ -40,6 +40,10 @@ PADROES_INJECTION = [
     r"quais\s+s[ãa]o\s+as\s+suas\s+instru[çc][õo]es\s+internas",
     r"liste\s+as\s+(suas\s+)?restri[çc][õo]es",
     r"mostre\s+seu\s+system\s+prompt",
+    # Spoofing de delimitadores de chat / retornos falsos de ferramenta (INJ-14)
+    r"<\s*/?\s*(?:user|system|assistant|tool_return|tool_call|function_call)\b[^>]*>",
+    r"<\|im_(?:start|end)\|>",
+    r"\[\s*(?:admin\s+override|obs\s+interna\s+do\s+sistema)\b",
 ]
 
 TERMOS_FORA_ESCOPO = [
@@ -162,6 +166,15 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
             ),
         )
 
+    texto_lower = texto_limpo.lower()
+
+    for padrao in PADROES_INJECTION:
+        if re.search(padrao, texto_lower):
+            return RetornoAntecipado(
+                motivo="PROMPT_INJECTION",
+                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
+            )
+
     # Bloqueio de caracteres aleatórios / gibberish
     if _eh_gibberish(texto_limpo):
         return RetornoAntecipado(
@@ -171,15 +184,6 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
                 "Por favor, digite sua dúvida sobre pedidos, estoque ou relatórios operacionais."
             ),
         )
-
-    texto_lower = texto_limpo.lower()
-
-    for padrao in PADROES_INJECTION:
-        if re.search(padrao, texto_lower):
-            return RetornoAntecipado(
-                motivo="PROMPT_INJECTION",
-                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
-            )
 
     for termo in TERMOS_FORA_ESCOPO:
         if re.search(termo, texto_lower):

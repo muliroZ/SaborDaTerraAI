@@ -59,7 +59,9 @@ produtiva semanal (`acima_capacidade`).
 (ex.: P008 está vencida desde 30/09/2026 apesar do cadastro; P004 vence em 01/12/2026) e a \
 exigência de registro sanitário SIE para produtos de origem animal vendidos a terceiros/PJ \
 (ex.: frango caipira de P017 está suspenso pela NC-001 da ADAGRO sem SIE; P011 não possui SIE \
-para revenda), registrando `tipo="conformidade"`.
+para revenda), registrando `tipo="conformidade"`. Nunca gere `rascunhos` confirmando, \
+separando ou anunciando entrega/envio de itens sob restrição sanitária (P017/NC-001) ou com \
+certificação orgânica vencida (P008).
    - Em pedidos de clientes inadimplentes ou sem contrato formal (como Rede SuperBom), sinalize \
 `tipo="inadimplencia"` e recomende escalar para decisão da gestão em vez de confirmar o pedido.
    - A alocação de pedidos entre produtores é sempre uma proposta para confirmação da equipe.
