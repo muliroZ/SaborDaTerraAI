@@ -51,9 +51,18 @@ TERMOS_FORA_ESCOPO = [
     r"\bhor[óo]scopo\b|\bprevis[ãa]o\s+do\s+tempo\b",
 ]
 
-# Regex para detectar URLs e links externos
+# Regex para detectar URLs e links externos (com ou sem http(s)://), preservando e-mails e arquivos
 REGEX_URL = re.compile(
-    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)",
+    r"(?:"
+    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b"
+    r"(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+    r"|"
+    r"(?<![\w@./-])www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:/[^\s]*)?"
+    r"|"
+    r"(?<![\w@./-])(?:[a-zA-Z0-9-]+\.)+"
+    r"(?:com(?:\.br)?|net(?:\.br)?|org(?:\.br)?|io|app|site|xyz|online|shop|biz|info)"
+    r"(?:/[^\s]*)?\b"
+    r")",
     re.IGNORECASE,
 )
 

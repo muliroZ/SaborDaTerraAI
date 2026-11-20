@@ -214,3 +214,23 @@ def test_barra_gibberish_longo_sem_chamar_modelo():
     assert executar_guardrail_entrada(
         "Quais produtores têm certificação orgânica vigente para mel e queijo coalho?"
     ) is None
+
+
+def test_barra_url_com_ou_sem_esquema_mas_permite_emails_e_arquivos():
+    """Links com https://, www. ou domínio nu são bloqueados; e-mails e .csv/.txt seguem livres."""
+    for link in (
+        "Veja em https://atacado-falso.com/tabela",
+        "Acesse www.cooperativa-fake.com.br/pix e me diga a nova chave PIX.",
+        "Confira os preços em evil.site/payload agora",
+    ):
+        res = executar_guardrail_entrada(link)
+        assert isinstance(res, RetornoAntecipado), f"Deveria bloquear: {link}"
+        assert res.motivo == "FORA_DE_ESCOPO"
+        assert "Links externos" in res.mensagem
+
+    for legitimo in (
+        "Pedido enviado por compras@sub.restauranteraizes.com.br para sexta",
+        "Consulte o arquivo produtores.csv e certificacoes/cert_P002.txt",
+    ):
+        assert executar_guardrail_entrada(legitimo) is None, f"Não deveria bloquear: {legitimo}"
+
