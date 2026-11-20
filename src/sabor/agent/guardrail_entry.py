@@ -110,7 +110,7 @@ def _eh_gibberish(texto: str) -> bool:
     if re.search(r"[^a-zA-Z0-9À-ÿ\s]{4,}", texto_sem_divisores):
         return True
 
-    # 2. Sequências puramente randômicas sem vogais em palavras longas (ex: "asjdhfiuasdfh")
+    # 2. Sequências randômicas sem vogais ou com 5+ consoantes seguidas (ex: "asjdhfiuasdfh")
     palavras = texto_sem_divisores.split()
     palavras_sem_sentido = 0
     vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
@@ -118,10 +118,11 @@ def _eh_gibberish(texto: str) -> bool:
         p_limpo = re.sub(r"[^a-zA-ZÀ-ÿ]", "", p)
         if len(p_limpo) >= 6:
             tem_vogal = any(c.lower() in vogais for c in p_limpo)
-            if not tem_vogal:
+            muitas_consoantes = bool(re.search(r"[bcdfghjklmnpqrstvwxyz]{5,}", p_limpo.lower()))
+            if not tem_vogal or muitas_consoantes:
                 palavras_sem_sentido += 1
 
-    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4 and len(palavras) <= 3:
+    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4:
         return True
 
     return False

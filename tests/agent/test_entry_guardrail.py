@@ -202,3 +202,15 @@ def test_estouro_orcamento_registra_motivo_em_log(caplog):
     assert turno.retorno_antecipado.motivo == "ORCAMENTO_TURNO_ESGOTADO"
     assert "Orçamento do turno esgotado" in caplog.text
     assert "request_limit" in caplog.text
+
+
+def test_barra_gibberish_longo_sem_chamar_modelo():
+    """Spam de caracteres aleatórios com mais de 3 palavras deve morrer na Etapa 2a sem LLM."""
+    spam = ("asjdhfiuasdfh qwrtypsdfg zxcvbnmklj" * 15)[:740]
+    resultado = executar_guardrail_entrada(spam)
+
+    assert isinstance(resultado, RetornoAntecipado)
+    assert resultado.motivo == "FORA_DE_ESCOPO"
+    assert executar_guardrail_entrada(
+        "Quais produtores têm certificação orgânica vigente para mel e queijo coalho?"
+    ) is None
