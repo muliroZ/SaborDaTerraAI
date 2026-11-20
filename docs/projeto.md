@@ -1,6 +1,6 @@
 # Contexto do projeto e alinhamento com os dados
 
-[← Visão geral](README.md)
+[← Visão geral](dados_gerais.md)
 
 Este documento relaciona o enunciado do **Projeto Intermediário** (UPE Campus Garanhuns + Sauter Tecnologia, disciplina de IA Generativa e Agentes) com o conteúdo de `dados/Facepe/`. Ele resume os requisitos em termos de dados: o que cada requisito exige das fontes, quais perguntas servem de referência para testar e onde os dados **não têm** resposta.
 
@@ -95,7 +95,7 @@ A matriz de qual produtor é relevante para qual pedido está em [produtores.md]
 
 | Requisito | O que os dados exigem |
 |---|---|
-| Interface conversacional para a equipe | As respostas são para a equipe interna, que pode ver CPF e dados bancários. Já os **rascunhos para terceiros** precisam omitir esses dados (ver [LGPD](README.md#dados-sensíveis-lgpd)). |
+| Interface conversacional para a equipe | As respostas são para a equipe interna, que pode ver CPF e dados bancários. Já os **rascunhos para terceiros** precisam omitir esses dados (ver [LGPD](dados_gerais.md#dados-sensíveis-lgpd)). |
 | Português coloquial, abreviações, erros e informação implícita | PED-003, PED-005 e PED-008 são os casos mais informais. PED-011 está em inglês. Há datas relativas ("amanhã", "sábado") e produtos implícitos ("o de sempre", "aquele queijo"). |
 | Precisão e indicação do documento de origem | Ver a convenção de citação acima. |
 | Relatórios e notificações autônomos quando solicitado | Resumo por produtor, contas a receber, dossiê para a ADAGRO, lista de orgânicos vigentes. |

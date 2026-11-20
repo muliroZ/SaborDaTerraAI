@@ -1,6 +1,6 @@
 # `fichas_tecnicas/` — Fichas técnicas de produto
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Cinco fichas em texto livre com a descrição comercial e técnica das principais linhas de produto. São a **única fonte de capacidade produtiva por produtor** e de parâmetros de armazenamento, e é o material que compradores como o Hospital São Francisco pedem junto com a proposta.
 
