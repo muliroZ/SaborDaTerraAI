@@ -1,6 +1,8 @@
 # CajAI
 
-Assistente de IA operacional para a cooperativa **Sabor da Terra** (apoio à triagem de pedidos, verificação sanitária/contratual, consulta financeira e comunicação com produtores).
+Assistente de IA operacional para a cooperativa **Sabor da Terra**, criado para apoiar a equipe e os produtores (`P001`…`P018`) na triagem de pedidos, verificação sanitária e contratual, consulta financeira e redação de notificações sem envio automático.
+
+O sistema combina **extração estruturada + regras determinísticas** com **busca híbrida em documentos** (pgvector + `tsvector`), **guardrails de entrada e saída**, **mascaramento de dados pessoais (LGPD/PII)**, **fallback entre modelos** e **cache de respostas estáticas**.
 
 ---
 
@@ -8,13 +10,53 @@ Assistente de IA operacional para a cooperativa **Sabor da Terra** (apoio à tri
 
 | Onde está | O que contém |
 | :--- | :--- |
-| **[projeto.md](docs/projeto.md)** | Visão geral do desafio, escopo funcional, personas e critérios de negócio do CajAI. |
+| **[docs/projeto.md](docs/projeto.md)** | Visão geral do desafio, escopo funcional, personas e critérios de negócio do CajAI. |
 | **[docs/dados_gerais.md](docs/dados_gerais.md)** | Índice geral da documentação técnica e dos datasets da cooperativa. |
 | **[docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md)** | Arquitetura em nuvem, mapeamento local → GCP (Cloud Run, Cloud SQL, Secret Manager) e passo a passo de deploy. |
 | **[docs/Arquitetura de Solução e Decisões Técnicas — SaborDaTerraAI.pdf](docs/Arquitetura%20de%20Solução%20e%20Decisões%20Técnicas%20—%20SaborDaTerraAI.pdf)** | Documento consolidado de arquitetura da solução e justificativas técnicas. |
 | **[docs/diagramas/](docs/diagramas/)** | Diagramas de visão geral, arquitetura do agente e modelo Entidade-Relacionamento (`.jpeg` e `.drawio`). |
 | **[docs/dev/](docs/dev/)** | Especificações internas de implementação: [agente e fallback](docs/dev/agente_e_fallback.md), [mascaramento LGPD/PII](docs/dev/mascaramento_pii.md), [observabilidade](docs/dev/observabilidade.md) e [triagem em lote](docs/dev/triagem_lote.md). |
 | **[docs/fontes/](docs/fontes/)** | Dicionário e regras de negócio das bases de dados (`produtores`, `pedidos`, `certificacoes`, `contratos`, `financeiro`, `lotes`, `fichas_tecnicas`, `sazonalidade`, `tabela_precos`). |
+
+---
+
+## Estrutura do Projeto e da Documentação
+
+```text
+.
+├── README.md
+├── pyproject.toml
+├── docker-compose.yml
+├── scripts/                  # init_db.py, etl.py, ingest_docs.py, triagem_lote.py, cache, etc;
+├── src/sabor/
+│   ├── agent/                # runner, guardrails (entrada/saída), schemas, fallback, etc;
+│   ├── tools/                # ferramentas de pedidos, regras, relatórios, notificações, etc;
+│   ├── sql/                  # schema.sql (PostgreSQL 17 + pgvector + tsvector);
+│   └── ui/                   # interface web em Streamlit (uv run sabor);
+├── tests/                    # testes unitários e de integração;
+└── docs/
+    ├── projeto.md
+    ├── dados_gerais.md
+    ├── arquitetura/          # deploy_gcp.md e PDF de arquitetura
+    ├── diagramas/            # Visao_Geral.jpeg, Agent-System.jpeg, ER-Diagram.jpeg e .drawio
+    ├── dev/                  # guias técnicos (agente/fallback, PII, observabilidade, triagem)
+    └── fontes/               # documentação das tabelas e arquivos de dados da cooperativa
+```
+
+---
+
+## Arquitetura e Diagramas
+
+### Visão Geral da Solução
+![Visão Geral da Arquitetura](docs/diagramas/Visao_Geral.jpeg)
+
+### Arquitetura do Agente e Fluxo de Turno
+![Arquitetura do Sistema de Agente](docs/diagramas/Agent-System.jpeg)
+
+### Modelo de Dados (ER)
+![Diagrama Entidade-Relacionamento](docs/diagramas/ER-Diagram.jpeg)
+
+*(Os arquivos editáveis `.drawio` também estão disponíveis em [`docs/diagramas/`](docs/diagramas/).)*
 
 ---
 
