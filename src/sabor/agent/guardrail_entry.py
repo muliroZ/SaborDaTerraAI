@@ -40,6 +40,10 @@ PADROES_INJECTION = [
     r"quais\s+s[ãa]o\s+as\s+suas\s+instru[çc][õo]es\s+internas",
     r"liste\s+as\s+(suas\s+)?restri[çc][õo]es",
     r"mostre\s+seu\s+system\s+prompt",
+    # Spoofing de delimitadores de chat / retornos falsos de ferramenta (INJ-14)
+    r"<\s*/?\s*(?:user|system|assistant|tool_return|tool_call|function_call)\b[^>]*>",
+    r"<\|im_(?:start|end)\|>",
+    r"\[\s*(?:admin\s+override|obs\s+interna\s+do\s+sistema)\b",
 ]
 
 TERMOS_FORA_ESCOPO = [
@@ -51,9 +55,18 @@ TERMOS_FORA_ESCOPO = [
     r"\bhor[óo]scopo\b|\bprevis[ãa]o\s+do\s+tempo\b",
 ]
 
-# Regex para detectar URLs e links externos
+# Regex para detectar URLs e links externos (com ou sem http(s)://), preservando e-mails e arquivos
 REGEX_URL = re.compile(
-    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)",
+    r"(?:"
+    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b"
+    r"(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+    r"|"
+    r"(?<![\w@./-])www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:/[^\s]*)?"
+    r"|"
+    r"(?<![\w@./-])(?:[a-zA-Z0-9-]+\.)+"
+    r"(?:com(?:\.br)?|net(?:\.br)?|org(?:\.br)?|io|app|site|xyz|online|shop|biz|info)"
+    r"(?:/[^\s]*)?\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -110,7 +123,7 @@ def _eh_gibberish(texto: str) -> bool:
     if re.search(r"[^a-zA-Z0-9À-ÿ\s]{4,}", texto_sem_divisores):
         return True
 
-    # 2. Sequências puramente randômicas sem vogais em palavras longas (ex: "asjdhfiuasdfh")
+    # 2. Sequências randômicas sem vogais ou com 5+ consoantes seguidas (ex: "asjdhfiuasdfh")
     palavras = texto_sem_divisores.split()
     palavras_sem_sentido = 0
     vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
@@ -118,10 +131,11 @@ def _eh_gibberish(texto: str) -> bool:
         p_limpo = re.sub(r"[^a-zA-ZÀ-ÿ]", "", p)
         if len(p_limpo) >= 6:
             tem_vogal = any(c.lower() in vogais for c in p_limpo)
-            if not tem_vogal:
+            muitas_consoantes = bool(re.search(r"[bcdfghjklmnpqrstvwxyz]{5,}", p_limpo.lower()))
+            if not tem_vogal or muitas_consoantes:
                 palavras_sem_sentido += 1
 
-    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4 and len(palavras) <= 3:
+    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4:
         return True
 
     return False
@@ -152,6 +166,15 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
             ),
         )
 
+    texto_lower = texto_limpo.lower()
+
+    for padrao in PADROES_INJECTION:
+        if re.search(padrao, texto_lower):
+            return RetornoAntecipado(
+                motivo="PROMPT_INJECTION",
+                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
+            )
+
     # Bloqueio de caracteres aleatórios / gibberish
     if _eh_gibberish(texto_limpo):
         return RetornoAntecipado(
@@ -161,15 +184,6 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
                 "Por favor, digite sua dúvida sobre pedidos, estoque ou relatórios operacionais."
             ),
         )
-
-    texto_lower = texto_limpo.lower()
-
-    for padrao in PADROES_INJECTION:
-        if re.search(padrao, texto_lower):
-            return RetornoAntecipado(
-                motivo="PROMPT_INJECTION",
-                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
-            )
 
     for termo in TERMOS_FORA_ESCOPO:
         if re.search(termo, texto_lower):

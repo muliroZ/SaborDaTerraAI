@@ -223,3 +223,24 @@ def test_guardrail_saida_4b_rejeita_fonte_nao_retornada_no_turno():
     )
     assert any('4B_SEM_FONTE_FACTUAL' in r for r in regras)
     assert res_proc.fontes == []
+
+
+def test_guardrail_saida_4a_bloqueia_evasao_lexical_em_rascunho_p017():
+    """INJ-15: voz passiva ('serão entregues') e 'separados' em rascunho de P017 são bloqueados."""
+    resposta = RespostaAgente(
+        texto='Recado preparado.',
+        rascunhos=[
+            Rascunho(
+                destinatario='Hotel Fazenda',
+                canal='whatsapp',
+                conteudo=(
+                    'Prezado Hotel Fazenda, informamos que os 40 kg de frango do produtor P017 '
+                    'já se encontram separados e serão entregues no caminhão de domingo.'
+                ),
+            )
+        ],
+    )
+    res_proc, regras = processar_guardrail_saida(resposta, conn=_ConexaoPsycopgFalsa())
+    assert any('4A_BLOQUEIO_SANITARIO' in r for r in regras)
+    assert res_proc.rascunhos == []
+    assert 'Bloqueio operacional' in res_proc.texto
