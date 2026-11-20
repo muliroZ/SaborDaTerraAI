@@ -13,7 +13,12 @@ from pydantic_ai import RunContext
 
 from sabor.agent.deps import AgentDeps
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaAgente
-from sabor.tools.base import SemPermissao, _resolver_usuario, registrar_rascunhos
+from sabor.tools.base import (
+    SemPermissao,
+    _resolver_usuario,
+    registrar_flags,
+    registrar_rascunhos,
+)
 from sabor.tools.pedidos import Comprador, Entrega, Item, Pedido, extrair_e_classificar
 from sabor.tools.regras import (
     _conn_eh_real,
@@ -62,6 +67,46 @@ def _formatar_quantidade_item(item: Item) -> str:
     if unidade:
         return f"{qtd_str} {unidade}"
     return qtd_str
+
+
+_DESCRICAO_PADRAO_SINALIZACAO = {
+    "ambiguidade": "Há informação ambígua no pedido: confirmar com o comprador.",
+    "data_inconsistente": "Data de entrega inconsistente: confirmar com o comprador.",
+    "conformidade": "Há restrição de conformidade (certificação, SIE ou documentação) a conferir.",
+    "fora_de_safra": "Há item fora de safra no período de entrega.",
+    "acima_capacidade": "Há item acima da capacidade semanal de referência.",
+    "inadimplencia": "O comprador tem pagamentos vencidos com a cooperativa.",
+    "credito": "Confirmar o pedido depende de decisão da gestão sobre o crédito.",
+    "privacidade": "A mensagem traz dados pessoais ou bancários: não repasse nos rascunhos.",
+}
+"""Para sinalizações sem motivo registrado (ex.: triagem gravada antes do F9 do Bloco 4)."""
+
+MAX_MOTIVOS_POR_FLAG = 5
+
+
+def _flags_das_sinalizacoes(pedido: Pedido, flags_itens: list[Flag]) -> list[Flag]:
+    """Uma flag por sinalização, descrita pelos motivos que as regras (#10) registraram.
+
+    Antes, a descrição só repetia o tipo ("Sinalização regulatória/operacional:
+    conformidade"), e o modelo redigia o resto (F9 do Bloco 4). Uma sinalização de
+    ambiguidade sem motivo próprio é omitida quando os itens ambíguos já têm flag.
+    """
+    tipos_itens = {f.tipo for f in flags_itens}
+    flags: list[Flag] = []
+    for tipo in pedido.sinalizacoes:
+        motivos = pedido.motivos_sinalizacoes.get(tipo, [])
+        if motivos:
+            descricao = "; ".join(m.rstrip(".") for m in motivos[:MAX_MOTIVOS_POR_FLAG]) + "."
+            if len(motivos) > MAX_MOTIVOS_POR_FLAG:
+                descricao += f" (+{len(motivos) - MAX_MOTIVOS_POR_FLAG} outros)"
+        elif tipo in tipos_itens:
+            continue
+        elif tipo == "data_inconsistente" and pedido.entrega.alerta:
+            descricao = pedido.entrega.alerta
+        else:
+            descricao = _DESCRICAO_PADRAO_SINALIZACAO.get(tipo, f"Sinalização: {tipo}.")
+        flags.append(Flag(tipo=tipo, descricao=descricao))
+    return flags
 
 
 def _descrever_item(item: Item) -> str:
@@ -271,10 +316,8 @@ async def rascunhar_notificacao(
 
     sinalizacoes = list(getattr(pedido, "sinalizacoes", None) or [])
     tem_inadimplencia = any("inadimpl" in s.lower() for s in sinalizacoes)
-    flags_obj = [
-        Flag(tipo=s, descricao=f"Sinalização regulatória/operacional: {s}")
-        for s in sinalizacoes
-    ]
+    # Flags dos itens não alocados (F2); as das sinalizações entram depois, com os motivos.
+    flags_obj: list[Flag] = []
 
     capacidades_produto: dict[str, float | None] = {}
     alocacoes_por_produtor: dict[str, list[dict[str, Any]]] = {}
@@ -372,6 +415,10 @@ async def rascunhar_notificacao(
 
     comprador_exibicao = pedido.comprador.nome or comprador_nome or "Comprador Geral"
     comprador_seguro = _mascarar_se_possivel(ctx, comprador_exibicao)
+
+    flags_obj = _flags_das_sinalizacoes(pedido, flags_obj) + flags_obj
+    # O runner anexa estas flags no lugar das que o modelo redigitar (F9 do Bloco 4).
+    registrar_flags(ctx.deps, flags_obj)
 
     secao_nao_alocados = (
         "\n\n**Itens sem alocação (decisão da equipe antes de responder ao comprador):**\n"

@@ -352,3 +352,20 @@ def test_item_que_o_modelo_marcou_ambiguo_resolve_por_nome_ou_sinonimo_exato():
     assert 'Fornecimento semanal.' in mel.observacao  # a nota da extração não se perde
     assert manteiga.ambiguo and manteiga.produto_id is None and manteiga.observacao == 'o de sempre'
     assert frango.ambiguo and frango.produto_id is None
+
+
+def test_regras_registram_o_motivo_de_cada_sinalizacao(conn, simular_llm):
+    """F9 do Bloco 4: as flags diziam só "Sinalização regulatória/operacional: <tipo>"."""
+    ped_001, _ = _triar(conn, simular_llm, 'PED-2026-001')
+    motivos = ped_001.motivos_sinalizacoes
+
+    assert motivos['data_inconsistente'] == [ped_001.entrega.alerta]
+    assert motivos['ambiguidade'] == ['Data de entrega a confirmar com o comprador.']
+    assert set(motivos) <= set(ped_001.sinalizacoes)
+
+    ped_003, _ = _triar(conn, simular_llm, 'PED-2026-003')
+    assert ped_003.motivos_sinalizacoes['privacidade'][0].startswith(
+        'A mensagem traz ou pede dados pessoais'
+    )
+    # O item ambíguo ("o queijo da última vez") é descrito no próprio item, não no motivo.
+    assert 'ambiguidade' not in ped_003.motivos_sinalizacoes

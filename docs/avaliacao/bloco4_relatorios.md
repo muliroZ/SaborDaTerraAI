@@ -290,6 +290,41 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
   - O termo "ovos" também segue restrito, porque aparece no parágrafo do P017 e na NC-001.
 - **Testes:** em `tests/agent/test_exit_guardrail.py`, um caso unitário com produtor regular e irregular no mesmo trecho e um caso com o banco real (P001 com goiaba e P003 com queijo passam; P017 com frango é bloqueado). Os dois falham sem a correção.
 
+**Status: resolvido.**
+
+- **Origem:** as regras do #10 calculavam os motivos e guardavam só a etiqueta. Agora `classificar_pedido` registra em `Pedido.motivos_sinalizacoes`, um campo calculado que fica fora do schema do LLM, o motivo de cada sinalização. Exemplos:
+  - "P017 interditado em inspeção sanitária (frango caipira)";
+  - "cajá: safra baixa no mês da entrega (11)";
+  - "SuperBom tem R$ 6.020,00 vencidos com a cooperativa";
+  - o alerta de data para `data_inconsistente`.
+
+  Os itens ambíguos não ganham motivo aqui, porque já vêm descritos no próprio item. Como o `resultado` da triagem é gravado inteiro, os motivos também ficam disponíveis para a fila.
+- **Flags da tool:** `rascunhar_notificacao` monta uma flag por sinalização com os motivos (até 5, mais a contagem do resto) e uma descrição padrão quando não há motivo, como numa triagem gravada antes da correção. Uma ambiguidade sem motivo é omitida quando os itens ambíguos já têm flag própria (ver o [F2](#f2)).
+- **Flags no turno:** o modelo redigitava a `data_inconsistente` como `ambiguidade`. Agora a tool registra as flags em `AgentDeps.flags`, e `_anexar_flags` passa a considerar cobertos também os tipos que alguma tool registrou no turno, além da lista fixa do `resumir_produtor` (ver o [F5](#f5)).
+- **Testes:**
+  - `test_regras_registram_o_motivo_de_cada_sinalizacao` (PED-001 e PED-003);
+  - `test_flags_das_sinalizacoes_usam_os_motivos_das_regras`;
+  - `test_flags_registradas_pela_tool_cobrem_os_tipos_dela`;
+  - a asserção de `ctx.deps.flags` no teste dos itens não alocados.
+
+  Os dois primeiros falham sem a correção.
+- **Validação:**
+  - A triagem foi reclassificada sem LLM.
+  - No REL-08 (3 rodadas) e no PED-2026-007, as flags do turno são exatamente as da tool, sem nenhuma descrição genérica.
+  - O REL-04 segue com as flags de conformidade e inadimplência do resumo.
+  - Nenhum turno foi bloqueado.
+
+### F11
+
+**A capacidade semanal do mel é lida como 0,05. Severidade: média. Encontrado com os motivos do [F9](#f9).**
+
+- **Evidência:** os motivos de `acima_capacidade` mostram "3 kg de mel de abelha jandaíra acima da capacidade semanal de referência (0.05)" (PED-2026-003) e "40 kg de mel silvestre acima da capacidade semanal de referência (0.05)" (PED-2026-006).
+  - As fontes dão ~180 kg/ano para o mel de jandaíra do P002 e 500 kg/mês na certificação do P002.
+  - Qualquer pedido de mel é sinalizado como acima da capacidade, e `rascunhar_notificacao` usa o mesmo valor ao propor alocação.
+- **Causa provável:** `_consultar_capacidade_semanal_chunks` (`src/sabor/tools/regras.py`) interpreta errado a capacidade escrita nos documentos de mel (unidade ou período).
+- **Status:** não corrigido; fora do escopo do Bloco 4.
+- **Outra observação:** a demanda pendente na caixa de entrada de queijo manteiga aparece como 620, o que também merece conferência.
+
 ### Observações (sem ação obrigatória)
 
 - **O resumo sempre traz rascunho.** Quando a pergunta só pede o resumo (REL-02, REL-03 e REL-04), o card de rascunho aparece mesmo assim. Isso é coerente com o docstring de `resumir_produtor`, mas vale decidir se o card deve aparecer só quando o operador pede uma mensagem.
@@ -304,3 +339,4 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 3. **[F2](#f2)**: um item do pedido some sem aviso.
 4. **[F4](#f4)** e **[F5](#f5)**: completam o REL-02 e o REL-04 como o PDF espera.
 5. **[F6](#f6)** a **[F9](#f9)**: acabamento.
+6. **[F11](#f11)**: encontrado depois; fica para a próxima rodada.

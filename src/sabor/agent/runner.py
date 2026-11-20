@@ -280,7 +280,8 @@ def _anexar_rascunhos(
 
 
 TIPOS_FLAG_DAS_TOOLS = {'resumir_produtor': frozenset({'conformidade', 'inadimplencia'})}
-"""Tipos de flag que cada tool monta sem LLM; quando ela roda, esses tipos vêm só dela."""
+"""Tipos de flag que vêm só da tool quando ela roda, mesmo que ela não registre nenhum
+(ex.: o modelo não marca inadimplência num resumo que não a encontrou)."""
 
 
 def _anexar_flags(
@@ -292,15 +293,18 @@ def _anexar_flags(
     """Etapa 4: troca as flags dos tipos cobertos pelas tools pelas que elas montaram.
 
     Com dois resumos no turno, o modelo deixava de copiar as flags do `resumir_produtor`, e
-    às vezes marcava como inadimplente o produtor, que é o credor (F5 e F6 do Bloco 4). Flags
-    de outros tipos que o modelo registrar (ex.: `ambiguidade`) continuam.
+    às vezes marcava como inadimplente o produtor, que é o credor (F5 e F6 do Bloco 4). No
+    REL-08, redigitava a `data_inconsistente` de `rascunhar_notificacao` como `ambiguidade`
+    (F9). Ficam cobertos os tipos de `TIPOS_FLAG_DAS_TOOLS` das tools que rodaram e os tipos
+    que alguma tool registrou no turno; flags do modelo de outros tipos continuam.
     """
     lista = getattr(deps, 'flags', None)
     geradas = [f for f in lista if isinstance(f, Flag)] if isinstance(lista, list) else []
     if isinstance(lista, list):
         lista.clear()
 
-    tipos_cobertos: set[str] = set()
+    # Cobertos: os tipos fixos das tools que rodaram e os tipos que alguma tool registrou.
+    tipos_cobertos: set[str] = {f.tipo for f in geradas}
     for tool in tools_chamadas:
         tipos_cobertos |= TIPOS_FLAG_DAS_TOOLS.get(tool, frozenset())
     if not tipos_cobertos:

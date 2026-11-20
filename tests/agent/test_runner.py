@@ -1183,3 +1183,39 @@ def test_fontes_dos_rascunhos_entram_mesmo_se_o_modelo_nao_citar():
         ('produtores.csv', 'P001'),
         ('produtores.csv', 'P010'),
     ]
+
+
+def test_flags_registradas_pela_tool_cobrem_os_tipos_dela():
+    """F9 do Bloco 4: o modelo redigitava a `data_inconsistente` de `rascunhar_notificacao`
+    como `ambiguidade`. Os tipos que a tool registrou vêm só dela."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.base import registrar_flags
+
+    data = Flag(tipo='data_inconsistente', descricao='04/11/2026 cai numa quarta-feira.')
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> dict:
+        registrar_flags(ctx.deps, [data])
+        return {'texto': 'ok'}
+
+    final = {'texto': 'ok', 'flags': [
+        {'tipo': 'ambiguidade', 'descricao': '04/11 é quarta-feira.'},  # outro tipo: fica
+        {'tipo': 'data_inconsistente', 'descricao': 'redigitada'},  # tipo coberto: sai
+    ]}
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-X'})], final
+        )],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-flags-rasc',
+        'rascunhe para o PED-X',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [(f.tipo, f.descricao) for f in turno.flags] == [
+        ('data_inconsistente', data.descricao),
+        ('ambiguidade', '04/11 é quarta-feira.'),
+    ]

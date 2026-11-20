@@ -15,9 +15,15 @@ if TYPE_CHECKING:
     from sabor.tools.pedidos import Item, Pedido
 
 
-def _adicionar_sinalizacao(pedido: Pedido, flag: str) -> None:
+def _adicionar_sinalizacao(pedido: Pedido, flag: str, motivo: str | None = None) -> None:
+    """Marca a sinalização e, se houver, guarda o motivo (sem repetir) em
+    `pedido.motivos_sinalizacoes`, para as flags dizerem o que foi encontrado (F9 do Bloco 4)."""
     if flag not in pedido.sinalizacoes:
         pedido.sinalizacoes.append(flag)
+    if motivo:
+        motivos = pedido.motivos_sinalizacoes.setdefault(flag, [])
+        if motivo not in motivos:
+            motivos.append(motivo)
 
 
 def _conn_eh_real(conn: Any) -> bool:
@@ -350,8 +356,21 @@ def classificar_pedido(
     # 1. AMBIGUIDADE (itens já mapeados ao catálogo por `normalizar_pedido`, #9)
     # =========================================================================
     if 'data_inconsistente' in pedido.sinalizacoes or pedido.entrega.alerta:
-        _adicionar_sinalizacao(pedido, 'ambiguidade')
+        if 'data_inconsistente' in pedido.sinalizacoes and pedido.entrega.alerta:
+            _adicionar_sinalizacao(pedido, 'data_inconsistente', pedido.entrega.alerta)
+            _adicionar_sinalizacao(
+                pedido, 'ambiguidade', 'Data de entrega a confirmar com o comprador.'
+            )
+        else:
+            _adicionar_sinalizacao(
+                pedido,
+                'ambiguidade',
+                f'Data de entrega a confirmar com o comprador: {pedido.entrega.alerta}'
+                if pedido.entrega.alerta
+                else 'Data de entrega a confirmar com o comprador.',
+            )
     if any(item.ambiguo for item in pedido.itens):
+        # Sem motivo aqui: cada item ambíguo já vem descrito no próprio item.
         _adicionar_sinalizacao(pedido, 'ambiguidade')
 
     # Compatibilidade: itens sem `produto_id` (triagens gravadas antes da normalização ou
@@ -368,7 +387,9 @@ def classificar_pedido(
         (pedido.tipo == 'consulta_financeira' and pedido.entrega.data_texto is None)
         or any(expr in texto_norm for expr in ('esse mes', 'este mes'))
     ):
-        _adicionar_sinalizacao(pedido, 'ambiguidade')
+        _adicionar_sinalizacao(
+            pedido, 'ambiguidade', 'Período citado de forma relativa ("esse mês"): confirmar as datas.'
+        )
 
     # 1c. Divergência de cargo/qualificação do signatário em relação ao contrato cadastrado no banco
     if _conn_eh_real(conn):
@@ -393,7 +414,13 @@ def classificar_pedido(
                 cargos_msg = {c for c in cargos_conhecidos if c in texto_norm}
                 cargos_contrato = {c for c in cargos_conhecidos if c in tc_norm}
                 if cargos_msg and cargos_contrato and cargos_msg != cargos_contrato:
-                    _adicionar_sinalizacao(pedido, 'ambiguidade')
+                    _adicionar_sinalizacao(
+                        pedido,
+                        'ambiguidade',
+                        'Cargo do signatário diverge do contrato cadastrado: '
+                        f"{', '.join(sorted(cargos_msg))} na mensagem × "
+                        f"{', '.join(sorted(cargos_contrato))} no contrato.",
+                    )
                     break
 
     # =========================================================================
@@ -416,8 +443,8 @@ def classificar_pedido(
             data_validade_ref=data_validade_ref,
         )
         item.produtores_elegiveis = elegiveis
-        if bloqueios_item:
-            _adicionar_sinalizacao(pedido, 'conformidade')
+        for bloqueio in bloqueios_item:
+            _adicionar_sinalizacao(pedido, 'conformidade', bloqueio)
 
         if _conn_eh_real(conn) and nome_busca and not item.ambiguo:
             if bool(item.organico) or exige_org_geral:
@@ -426,7 +453,9 @@ def classificar_pedido(
                     (prod_id, f'%{nome_busca}%'),
                 ).fetchone()
                 if row_preco is not None and row_preco[0] is None:
-                    _adicionar_sinalizacao(pedido, 'conformidade')
+                    _adicionar_sinalizacao(
+                        pedido, 'conformidade', f'Sem preço orgânico na tabela para {nome_busca}.'
+                    )
 
             row_safra = conn.execute(
                 """
@@ -439,25 +468,50 @@ def classificar_pedido(
                 (prod_id, f'%{nome_busca}%', mes_entrega),
             ).fetchone()
             if row_safra and row_safra[0] in ('nenhuma', 'baixa'):
-                _adicionar_sinalizacao(pedido, 'fora_de_safra')
+                _adicionar_sinalizacao(
+                    pedido,
+                    'fora_de_safra',
+                    f'{nome_busca}: safra {row_safra[0]} no mês da entrega ({mes_entrega:02d}).',
+                )
 
             qtd = item.quantidade or 0.0
             cap_semanal = _consultar_capacidade_semanal_chunks(conn, nome_busca)
             if cap_semanal is not None and qtd > 0:
                 demanda_caixa = _calcular_demanda_pendente_caixa_entrada(conn, nome_busca)
-                if (
-                    qtd > cap_semanal
-                    or (dias_ate_entrega is not None and dias_ate_entrega <= 1 and qtd >= 0.8 * cap_semanal)
-                    or (demanda_caixa > cap_semanal and qtd >= 0.25 * cap_semanal)
-                ):
-                    _adicionar_sinalizacao(pedido, 'acima_capacidade')
+                qtd_txt = f'{qtd:g} {item.unidade or ""}'.strip()
+                cap_txt = f'{cap_semanal:g}'
+                if qtd > cap_semanal:
+                    motivo_cap = (
+                        f'{qtd_txt} de {nome_busca} acima da capacidade semanal de referência '
+                        f'({cap_txt}).'
+                    )
+                elif dias_ate_entrega is not None and dias_ate_entrega <= 1 and qtd >= 0.8 * cap_semanal:
+                    motivo_cap = (
+                        f'{qtd_txt} de {nome_busca} para entrega em até 1 dia, perto da '
+                        f'capacidade semanal ({cap_txt}).'
+                    )
+                elif demanda_caixa > cap_semanal and qtd >= 0.25 * cap_semanal:
+                    motivo_cap = (
+                        f'{nome_busca}: a demanda pendente na caixa de entrada '
+                        f'({demanda_caixa:g}) passa da capacidade semanal ({cap_txt}).'
+                    )
+                else:
+                    motivo_cap = None
+                if motivo_cap:
+                    _adicionar_sinalizacao(pedido, 'acima_capacidade', motivo_cap)
 
             for pid_eleg in elegiveis:
                 carga_por_produtor_elegivel[pid_eleg] = carga_por_produtor_elegivel.get(pid_eleg, 0.0) + qtd
 
     if dias_ate_entrega is not None and dias_ate_entrega <= 1:
-        if any(carga >= 200.0 for carga in carga_por_produtor_elegivel.values()):
-            _adicionar_sinalizacao(pedido, 'acima_capacidade')
+        for pid_carga, carga in carga_por_produtor_elegivel.items():
+            if carga >= 200.0:
+                _adicionar_sinalizacao(
+                    pedido,
+                    'acima_capacidade',
+                    f'{pid_carga} somaria {carga:g} nos itens deste pedido, com entrega em até '
+                    '1 dia.',
+                )
 
     if _conn_eh_real(conn) and dias_ate_entrega is not None and dias_ate_entrega > 30:
         if any(i.ambiguo for i in pedido.itens):
@@ -466,7 +520,11 @@ def classificar_pedido(
                 (mes_entrega,),
             ).fetchone()
             if baixas_mes and baixas_mes[0] > 0:
-                _adicionar_sinalizacao(pedido, 'fora_de_safra')
+                _adicionar_sinalizacao(
+                    pedido,
+                    'fora_de_safra',
+                    f'Itens a definir para o mês {mes_entrega:02d}, que tem produtos fora de safra.',
+                )
 
         vencidos_futuro = conn.execute(
             """
@@ -476,7 +534,12 @@ def classificar_pedido(
             (data_validade_ref,),
         ).fetchone()
         if vencidos_futuro and vencidos_futuro[0] > 0:
-            _adicionar_sinalizacao(pedido, 'conformidade')
+            _adicionar_sinalizacao(
+                pedido,
+                'conformidade',
+                f'{vencidos_futuro[0]} produtor(es) com certificação orgânica vencida até a '
+                f'entrega ({data_validade_ref.strftime("%d/%m/%Y")}).',
+            )
 
     # =========================================================================
     # 3. CONFORMIDADE DE HISTÓRICO DO COMPRADOR, CATÁLOGO ORGÂNICO E AUDITORIA
@@ -499,19 +562,38 @@ def classificar_pedido(
                     (f'%{termo_comp}%', f'%{termo_comp}%'),
                 ).fetchone()
                 if hist_sem_sie is not None:
-                    _adicionar_sinalizacao(pedido, 'conformidade')
+                    _adicionar_sinalizacao(
+                        pedido,
+                        'conformidade',
+                        'O histórico do comprador tem produto de origem animal de produtor '
+                        'sem SIE: o próximo fornecimento precisa vir de produtor com SIE.',
+                    )
 
         if pedido.tipo in ('parceria', 'notificacao_oficial') or exige_org_geral or any(
             t in texto_norm for t in ('laudo', 'fitossanitario', 'phytosanitary', 'inspecao')
         ):
-            _adicionar_sinalizacao(pedido, 'conformidade')
+            _adicionar_sinalizacao(
+                pedido,
+                'conformidade',
+                'O pedido exige comprovação documental (certificação orgânica, laudo ou '
+                'inspeção).',
+            )
 
     # =========================================================================
     # 4. CRÉDITO / INADIMPLÊNCIA
     # =========================================================================
-    if verificar_inadimplencia_comprador(conn, pedido.comprador.nome, mensagem_original, data_corte) > 0:
-        _adicionar_sinalizacao(pedido, 'inadimplencia')
-        _adicionar_sinalizacao(pedido, 'credito')
+    vencido_comprador = verificar_inadimplencia_comprador(
+        conn, pedido.comprador.nome, mensagem_original, data_corte
+    )
+    if vencido_comprador > 0:
+        valor_txt = f'R$ {vencido_comprador:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+        comprador_txt = pedido.comprador.nome or 'O comprador'
+        _adicionar_sinalizacao(
+            pedido, 'inadimplencia', f'{comprador_txt} tem {valor_txt} vencidos com a cooperativa.'
+        )
+        _adicionar_sinalizacao(
+            pedido, 'credito', 'Confirmar o pedido depende de decisão da gestão sobre o crédito.'
+        )
 
     # =========================================================================
     # 5. PRIVACIDADE E LGPD
@@ -525,7 +607,12 @@ def classificar_pedido(
             for termo in ('cpf', 'dados bancarios', 'bank', 'iban', 'swift', 'manda o pix', 'chave pix')
         )
     ):
-        _adicionar_sinalizacao(pedido, 'privacidade')
+        _adicionar_sinalizacao(
+            pedido,
+            'privacidade',
+            'A mensagem traz ou pede dados pessoais, bancários ou financeiros: não repasse '
+            'esses dados nos rascunhos.',
+        )
 
     # =========================================================================
     # 6. URGÊNCIA DETERMINÍSTICA ('critica', 'alta', 'normal', 'baixa')

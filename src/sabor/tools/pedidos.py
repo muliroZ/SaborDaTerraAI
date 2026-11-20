@@ -157,11 +157,16 @@ class Pedido(BaseModel):
 
     pedido_id: SkipJsonSchema[str | None] = None
     sinalizacoes: SkipJsonSchema[list[str]] = Field(default_factory=list)
+    motivos_sinalizacoes: SkipJsonSchema[dict[str, list[str]]] = Field(default_factory=dict)
+    """Por que cada sinalização foi dada (ex.: `conformidade` → "P017 sem registro SIE
+    (frango caipira)"), preenchido pelas regras (#10). Sinalizações sem motivo registrado
+    ficam fora do dicionário."""
     urgencia: SkipJsonSchema[Urgencia | None] = None
 
 
 _CAMPOS_CALCULADOS: dict[str, Any] = {
     'sinalizacoes': True,
+    'motivos_sinalizacoes': True,
     'urgencia': True,
     'entrega': {'data', 'data_fim', 'data_estimada', 'alerta'},
     'itens': {'__all__': {'produto_id', 'produtores_elegiveis'}},

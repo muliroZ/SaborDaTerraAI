@@ -137,6 +137,7 @@ def _ctx(
         usuario=usuario,
         mascarador=mascarador,
         rascunhos=[],
+        flags=[],
     )
     return SimpleNamespace(deps=deps)
 
@@ -614,3 +615,32 @@ async def test_itens_nao_alocados_aparecem_no_texto_e_nas_flags():
     descricoes = {f.tipo: f.descricao for f in res.flags if "Item" in f.descricao}
     assert "5 kg de manteiga" in descricoes["ambiguidade"]
     assert "10 kg de cajá" in descricoes["sem_produtor_elegivel"]
+    assert ctx.deps.flags == res.flags  # o runner anexa estas, não as do modelo (F9)
+
+
+def test_flags_das_sinalizacoes_usam_os_motivos_das_regras():
+    """F9 do Bloco 4: uma flag por sinalização, com o que as regras encontraram."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.rascunhar_notificacao import _flags_das_sinalizacoes
+
+    pedido = Pedido(
+        pedido_id="PED-X",
+        tipo="compra",
+        entrega=Entrega(data_texto="terça 04/nov", alerta="04/11/2026 cai numa quarta-feira."),
+        sinalizacoes=["conformidade", "data_inconsistente", "privacidade", "ambiguidade"],
+        motivos_sinalizacoes={
+            "conformidade": [f"P0{n:02d} sem DAP/CAF (goiaba)" for n in range(1, 8)],
+        },
+    )
+    item_ambiguo = Flag(tipo="ambiguidade", descricao="Item não alocado, produto ambíguo: manteiga.")
+
+    flags = {f.tipo: f.descricao for f in _flags_das_sinalizacoes(pedido, [item_ambiguo])}
+
+    assert flags["conformidade"] == (
+        "P001 sem DAP/CAF (goiaba); P002 sem DAP/CAF (goiaba); P003 sem DAP/CAF (goiaba); "
+        "P004 sem DAP/CAF (goiaba); P005 sem DAP/CAF (goiaba). (+2 outros)"
+    )
+    assert flags["data_inconsistente"] == "04/11/2026 cai numa quarta-feira."
+    assert flags["privacidade"].startswith("A mensagem traz dados pessoais")
+    assert "ambiguidade" not in flags  # o item ambíguo já tem flag própria
+    assert not any("Sinalização regulatória" in d for d in flags.values())
