@@ -59,6 +59,7 @@ from sabor.agent.guardrail_exit import processar_guardrail_saida
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
+    Flag,
     Fonte,
     Rascunho,
     Relatorio,
@@ -278,6 +279,40 @@ def _anexar_rascunhos(
     return resposta.model_copy(update={'rascunhos': list(unicos.values())})
 
 
+TIPOS_FLAG_DAS_TOOLS = {'resumir_produtor': frozenset({'conformidade', 'inadimplencia'})}
+"""Tipos de flag que cada tool monta sem LLM; quando ela roda, esses tipos vêm só dela."""
+
+
+def _anexar_flags(
+    resposta: RespostaAgente,
+    deps: AgentDeps,
+    *,
+    tools_chamadas: set[str],
+) -> RespostaAgente:
+    """Etapa 4: troca as flags dos tipos cobertos pelas tools pelas que elas montaram.
+
+    Com dois resumos no turno, o modelo deixava de copiar as flags do `resumir_produtor`, e
+    às vezes marcava como inadimplente o produtor, que é o credor (F5 e F6 do Bloco 4). Flags
+    de outros tipos que o modelo registrar (ex.: `ambiguidade`) continuam.
+    """
+    lista = getattr(deps, 'flags', None)
+    geradas = [f for f in lista if isinstance(f, Flag)] if isinstance(lista, list) else []
+    if isinstance(lista, list):
+        lista.clear()
+
+    tipos_cobertos: set[str] = set()
+    for tool in tools_chamadas:
+        tipos_cobertos |= TIPOS_FLAG_DAS_TOOLS.get(tool, frozenset())
+    if not tipos_cobertos:
+        return resposta
+
+    unicas: dict[tuple[str, str], Flag] = {}
+    for flag in geradas:
+        unicas.setdefault((flag.tipo, flag.descricao), flag)
+    do_modelo = [f for f in resposta.flags if f.tipo not in tipos_cobertos]
+    return resposta.model_copy(update={'flags': [*unicas.values(), *do_modelo]})
+
+
 def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAgente:
     """Move citações `[arquivo · ref]` do texto para `fontes` e limpa blocos `Fontes:`."""
     if not resposta.texto:
@@ -471,6 +506,69 @@ def _coletar_fontes_valor(
         destino.append(valor.strip())
 
 
+def _sem_extensao(arquivo: str) -> str:
+    """`laudos/laudo_x_P003.txt` → `laudos/laudo_x_p003` (tudo depois do 1º ponto do nome sai)."""
+    pasta, _, nome = arquivo.strip().rpartition('/')
+    base = nome.split('.', 1)[0]
+    return f'{pasta}/{base}'.lower() if pasta else base.lower()
+
+
+def _fontes_estruturadas_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[Fonte]:
+    """Fontes (`arquivo`, `referencia`) que as tools devolveram no turno."""
+    fontes: list[Fonte] = []
+
+    def percorrer(valor: Any) -> None:
+        if hasattr(valor, 'model_dump'):
+            valor = valor.model_dump()
+        if isinstance(valor, dict):
+            arquivo, referencia = valor.get('arquivo'), valor.get('referencia')
+            if isinstance(arquivo, str) and isinstance(referencia, str):
+                fontes.append(Fonte(arquivo=arquivo, referencia=referencia))
+            for v in valor.values():
+                if isinstance(v, (dict, list, tuple)):
+                    percorrer(v)
+        elif isinstance(valor, (list, tuple)):
+            for item in valor:
+                percorrer(item)
+
+    for msg in novas_mensagens:
+        for part in getattr(msg, 'parts', None) or ():
+            if isinstance(part, ToolReturnPart):
+                percorrer(part.content)
+    return fontes
+
+
+def _reparar_extensao_das_fontes(
+    resposta: RespostaAgente, fontes_tools: Sequence[Fonte]
+) -> RespostaAgente:
+    """Corrige a extensão de uma fonte que o modelo redigitou errado.
+
+    O modelo copia as fontes das tools e às vezes troca a extensão (`laudo…P003.txt` virou
+    `.csv`, `.___` e `.quist.txt` no REL-04 do Bloco 4). A regra 4B bloqueava a resposta
+    inteira por isso. Só se repara a fonte quando uma fonte retornada no turno tem a mesma
+    referência, a mesma pasta e o mesmo nome, mudando só a extensão. Uma fonte inventada
+    continua sem correspondência e é barrada pela 4B.
+    """
+    exatas = {(f.arquivo.strip(), f.referencia.strip().lower()) for f in fontes_tools}
+    por_nome = {
+        (_sem_extensao(f.arquivo), f.referencia.strip().lower()): f.arquivo.strip()
+        for f in fontes_tools
+    }
+    reparadas: list[Fonte] = []
+    vistas: set[tuple[str, str]] = set()
+    for fonte in resposta.fontes:
+        ref = fonte.referencia.strip().lower()
+        if (fonte.arquivo.strip(), ref) not in exatas:
+            original = por_nome.get((_sem_extensao(fonte.arquivo), ref))
+            if original is not None:
+                fonte = fonte.model_copy(update={'arquivo': original})
+        chave = (fonte.arquivo.strip(), ref)
+        if chave not in vistas:
+            vistas.add(chave)
+            reparadas.append(fonte)
+    return resposta.model_copy(update={'fontes': reparadas})
+
+
 def _extrair_fontes_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[str]:
     fontes: list[str] = []
     for msg in novas_mensagens:
@@ -658,6 +756,8 @@ def processar_turno(
             deps_exec.relatorios.clear()  # só anexa o que for gerado neste turno (#15)
         if isinstance(getattr(deps_exec, 'rascunhos', None), list):
             deps_exec.rascunhos.clear()  # idem para os rascunhos das tools
+        if isinstance(getattr(deps_exec, 'flags', None), list):
+            deps_exec.flags.clear()  # e para as flags das tools
         mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
         mensagem_para_llm = (
             mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
@@ -755,15 +855,18 @@ def processar_turno(
                 for part in getattr(msg, 'parts', ())
             ),
         )
+        tools_chamadas = {
+            part.tool_name
+            for msg in resultado.new_messages()
+            for part in getattr(msg, 'parts', ())
+            if isinstance(part, ToolCallPart)
+        }
         resposta_final = _anexar_rascunhos(
             resposta_final,
             deps_exec,
-            tool_de_rascunho_chamada=any(
-                isinstance(part, ToolCallPart) and part.tool_name in TOOLS_DE_RASCUNHO
-                for msg in resultado.new_messages()
-                for part in getattr(msg, 'parts', ())
-            ),
+            tool_de_rascunho_chamada=bool(tools_chamadas & TOOLS_DE_RASCUNHO),
         )
+        resposta_final = _anexar_flags(resposta_final, deps_exec, tools_chamadas=tools_chamadas)
         resposta_final = _normalizar_fontes_e_texto_resposta(resposta_final)
         resposta_final = _restaurar_pii_resposta(resposta_final, deps_exec.mascarador)
 
@@ -774,6 +877,9 @@ def processar_turno(
                 conn_propria.rollback()
 
         # Guardrail de saída aqui!
+        resposta_final = _reparar_extensao_das_fontes(
+            resposta_final, _fontes_estruturadas_das_tools(resultado.new_messages())
+        )
         fontes_turno = _extrair_fontes_das_tools(resultado.new_messages())
         resposta_final, regras_saida = processar_guardrail_saida(
             resposta_final,

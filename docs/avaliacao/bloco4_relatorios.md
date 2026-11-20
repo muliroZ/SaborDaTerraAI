@@ -17,8 +17,8 @@ Legenda: ✅ atende ao esperado no PDF · ⚠️ atende ao esperado, mas com def
 |---|---|---|---|
 | REL-01 | Resumo da Maria das Graças + rascunho | ⚠️ | Usa só `resumir_produtor`. Vendas R$ 1.090 / R$ 0, pendente R$ 0, sem NC falsa e com o card de rascunho. Mas afirma "nenhum pedido elegível", o que é falso (P001 tem goiaba no PED-2026-002): achado [F1](#f1). |
 | REL-02 | "Gere um relatório da Maria das Graças" | ⚠️ | Não cai em falha segura: o filtro de `prepare_tools` esconde `gerar_relatorio` e o pedido vai para `resumir_produtor`. Mas o modelo encadeia mais 2 ou 3 tools redundantes nas 3 rodadas: achado [F4](#f4), resolvido. |
-| REL-03 | Resumo do P008 e do P004 | ⚠️ | P008 aparece com certificação vencida desde 30/09/2026 e P004 vencendo em 01/12/2026 (3/3). Em 1 das 3 rodadas, os rascunhos saíram com `\n` literal no card ([F3](#f3), resolvido). A flag `inadimplencia` foi aplicada à P004, que é a credora ([F6](#f6)). |
-| REL-04 | Resumo do Cícero Romão (P003) | ❌ | Mostra R$ 6.020 vencidos, mas não cita a SuperBom (0/3) e diz "nenhum pedido elegível", quando existem pedidos abertos de queijo coalho, ricota e queijo manteiga: achados [F1](#f1) (resolvido) e [F5](#f5). |
+| REL-03 | Resumo do P008 e do P004 | ⚠️ | P008 aparece com certificação vencida desde 30/09/2026 e P004 vencendo em 01/12/2026 (3/3). Em 1 das 3 rodadas, os rascunhos saíram com `\n` literal no card ([F3](#f3), resolvido). A flag `inadimplencia` foi aplicada à P004, que é a credora ([F6](#f6), resolvido). |
+| REL-04 | Resumo do Cícero Romão (P003) | ❌ | Mostra R$ 6.020 vencidos, mas não cita a SuperBom (0/3) e diz "nenhum pedido elegível", quando existem pedidos abertos de queijo coalho, ricota e queijo manteiga: achados [F1](#f1) e [F5](#f5), ambos resolvidos. |
 | REL-05 | Relatório de contas a receber | ✅ | Chama `gerar_relatorio('contas_a_receber')` e anexa `contas_a_receber_20261030.md`. O texto traz R$ 8.690 vencidos, R$ 4.690 a vencer e R$ 13.380 no total, sem colar o Markdown. Tabelas conferidas linha a linha. |
 | REL-06 | Levantamento de orgânicos vigentes para baixar | ✅ | Chama `gerar_relatorio('organicos_vigentes')` e anexa o `.md` com 8 produtores vigentes. P008 fica fora e aparece na seção "Atenção". |
 | REL-07 | Dossiê ADAGRO do PED-2026-014 | ✅ | Anexa `dossie_adagro_PED-2026-014_20261030.md` com o que foi pedido, o que existe e o que falta, item a item. Confere com `docs/fontes/pedidos.md` (8 vigentes, laudos só de P002/P003, 3 lotes só de queijo coalho e mel, NC-001 descumprida, NC-002 sem evidência). |
@@ -163,6 +163,33 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 - **Causa:** `ResumoProdutorResultado` só traz totais (`total_pendente`, `total_vencido`), sem quebrar por comprador. O modelo não tem o dado e, corretamente, não o inventa.
 - **Correção sugerida:** incluir em `ResumoProdutorResultado` uma lista de vencidos e pendentes com comprador, valor, vencimento e dias de atraso, como `consultar_financeiro` já retorna, e usá-la no texto e no rascunho.
 
+**Status: resolvido.**
+
+- **Correção:** `ResumoProdutorResultado.pendencias_por_comprador` soma, por comprador, o vencido e o a vencer, com o maior atraso, o primeiro vencimento e as fontes. O rascunho ganha uma linha por comprador ("Rede SuperBom Atacado: R$ 6.020,00 vencidos (12 dias de atraso)").
+- **Ponto do [F1](#f1) cruzado:** cada pedido em aberto traz `comprador_deve_vencido`, que é quanto aquele comprador deve, já vencido, a este produtor.
+  - Quando há valor, o resumo gera o alerta "PED-2026-006 é de Rede SuperBom Atacado, que tem R$ 6.020,00 vencidos com o produtor; a alocação depende de validação da gestão".
+  - A comparação de nomes (`_mesmo_comprador`) aceita grafias diferentes, como "Dona Cremilda - Lanchonete da Feira" × "Lanchonete da Feira", e ignora palavras genéricas, como "Garanhuns".
+  - O cruzamento vale só para dívidas com o próprio produtor. A inadimplência geral do comprador já é sinalizada pela triagem.
+- **Regressão encontrada e corrigida (flags):** com o resumo maior, o REL-03 passou a sair sem nenhuma flag (3/3). O modelo deixava de copiá-las; isolando o `resumir_produtor` do F4, as flags voltavam.
+  - Agora `resumir_produtor` monta as flags de `conformidade` (alertas documentais) e de `inadimplencia` (uma por comprador com vencido) e as registra em `AgentDeps.flags`.
+  - Na Etapa 4, `_anexar_flags` usa essas flags no lugar das do modelo nesses dois tipos. Os demais tipos, como `ambiguidade`, continuam. O prompt diz para não repeti-las.
+- **Regressão encontrada e corrigida (fontes):** o REL-04 passou a ser bloqueado pela 4B (3/3), porque o modelo redigitava a fonte do laudo com a extensão errada (`.csv`, `.___`, `.quist.txt`).
+  - `_reparar_extensao_das_fontes` corrige a fonte só quando uma fonte retornada no turno tem a mesma pasta, o mesmo nome e a mesma referência, mudando só a extensão.
+  - Uma fonte inventada continua sendo barrada. Ver também o [F8](#f8).
+- **Testes:**
+  - `test_resumo_diz_quem_deve_ao_produtor` (com as flags);
+  - `test_mesmo_comprador_ignora_palavras_genericas`;
+  - no teste de ponta a ponta da triagem: o comprador do pedido deve ao produtor e aparecem o alerta e a flag;
+  - `test_flags_do_resumo_substituem_as_do_modelo_nos_tipos_cobertos`;
+  - `test_flags_do_modelo_ficam_quando_o_resumo_nao_roda`;
+  - `test_repara_so_a_extensao_de_fonte_retornada_pela_tool`.
+
+  Os testes do resumo e das flags falham sem a correção.
+- **Validação com o agente:** REL-01, REL-03 e REL-04, 3 rodadas, 9 turnos, sem bloqueio do guardrail.
+  - O REL-04 cita a Rede SuperBom e o PED-2026-006 em 3/3.
+  - O REL-03 traz em 3/3 as flags de conformidade da P008 e da P004, mais a inadimplência atribuída ao PNAE.
+  - Os turnos ficaram em cerca de 9 mil tokens (REL-01), 10 mil (REL-04) e 15 mil (REL-03).
+
 ### F6
 
 **A flag `inadimplencia` é aplicada ao produtor credor. Severidade: baixa.**
@@ -172,6 +199,8 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 - **Correção sugerida:**
   - Deixar claro no prompt que, no resumo do produtor, o vencido é crédito dele, e que a flag vale para o comprador citado.
   - Ou gerar as flags de forma determinística a partir de `resumir_produtor` (o que combina com [F5](#f5)).
+
+**Status: resolvido junto com o [F5](#f5).** As flags de `inadimplencia` e `conformidade` do resumo são montadas pela tool. A inadimplência sempre nomeia o comprador e o produtor credor: "Prefeitura de Garanhuns - PNAE tem R$ 1.020,00 vencidos com Ana Lúcia Bezerra da Costa (P004)". O modelo não consegue mais marcar a P004 como inadimplente. Nas 9 rodadas de validação do F5, nenhuma flag foi aplicada ao produtor.
 
 ### F7
 
@@ -195,6 +224,8 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
   - No REL-07, aparecem `produtores.csv · produtores.csv` (gerada pelo modelo) e `produtores.csv · cadastro` (fixa em `src/sabor/tools/relatorios.py:738`).
   - O REL-03 da rodada 1 cita só FIN-2026-006 para a P004, que também tem a FIN-2026-007.
 - **Correção sugerida:** juntar às `fontes` da resposta as fontes retornadas pelas tools (`_extrair_fontes_das_tools` já as coleta para a regra 4b), em vez de depender da lista que o modelo redige.
+
+**Status: parcial.** A extensão errada numa fonte retornada pela tool agora é reparada antes da 4B (ver o [F5](#f5)). Continuam em aberto as fontes agregadas pelo modelo (`produtores.csv · P001, P004, …` no REL-08), a fonte `pedidos.csv`, que deveria ser `pedidos.json`, no `resumir_produtor`, e `produtores.csv · cadastro` no dossiê.
 
 ### F9
 

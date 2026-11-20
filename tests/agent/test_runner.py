@@ -1014,3 +1014,79 @@ def test_rascunho_do_modelo_sem_tool_tem_quebras_de_linha_corrigidas():
 
     [rascunho] = turno.rascunhos
     assert rascunho.conteudo == 'Prezados,\n\nConfirmamos o recebimento.'
+
+
+def test_flags_do_resumo_substituem_as_do_modelo_nos_tipos_cobertos():
+    """F5/F6 do Bloco 4: conformidade e inadimplência vêm do `resumir_produtor`; o modelo não
+    as omite nem marca o produtor credor como inadimplente. Outros tipos do modelo ficam."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.base import registrar_flags
+
+    flag_tool = Flag(tipo='inadimplencia', descricao='Rede SuperBom tem R$ 6.020,00 vencidos com P003.')
+
+    def resumir_produtor(ctx: RunContext[AgentDeps], produtor: str) -> dict:
+        registrar_flags(ctx.deps, [flag_tool, flag_tool])  # repetida: entra uma vez
+        return {'produtor_id': produtor}
+
+    final = {
+        'texto': 'Resumo pronto.',
+        'flags': [
+            {'tipo': 'inadimplencia', 'descricao': 'O produtor P003 possui valores vencidos.'},
+            {'tipo': 'ambiguidade', 'descricao': 'Confirmar qual queijo.'},
+        ],
+    }
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P003'})], final
+        )],
+        tools=[resumir_produtor],
+    )
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-flags', 'resuma o Cícero', agente=agente, deps=deps, guardrail_entrada=lambda _m: None
+    )
+
+    assert [(f.tipo, f.descricao) for f in turno.flags] == [
+        ('inadimplencia', flag_tool.descricao),
+        ('ambiguidade', 'Confirmar qual queijo.'),
+    ]
+    assert deps.flags == []
+
+
+def test_flags_do_modelo_ficam_quando_o_resumo_nao_roda():
+    final = {'texto': 'ok', 'flags': [{'tipo': 'conformidade', 'descricao': 'P017 suspenso.'}]}
+    turno = processar_turno(
+        'sess-flags-modelo',
+        'o frango do P017 pode ser vendido?',
+        agente=criar_agente([_modelo_chama_tools_e_responde([], final)], tools=[]),
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [f.tipo for f in turno.flags] == ['conformidade']
+
+
+def test_repara_so_a_extensao_de_fonte_retornada_pela_tool():
+    """REL-04 do Bloco 4: o modelo trocou a extensão do laudo, e a 4B bloqueava a resposta."""
+    from sabor.agent.runner import _reparar_extensao_das_fontes
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    laudo = 'laudos/laudo_sanitario_queijaria_cicero_P003.txt'
+    tools = [Fonte(arquivo=laudo, referencia='LAUDO'), Fonte(arquivo='financeiro.csv', referencia='FIN-2026-013')]
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.csv', referencia='LAUDO'),
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.quist.txt', referencia='LAUDO'),
+        Fonte(arquivo='financeiro.csv', referencia='FIN-2026-013'),
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.csv', referencia='VALIDADE'),
+        Fonte(arquivo='laudos/laudo_inventado_P003.txt', referencia='LAUDO'),
+    ])
+
+    fontes = _reparar_extensao_das_fontes(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [
+        (laudo, 'LAUDO'),  # .csv e .quist.txt viram a mesma fonte, sem duplicar
+        ('financeiro.csv', 'FIN-2026-013'),
+        # Outra referência ou outro arquivo: fica como veio, e a 4B decide.
+        ('laudos/laudo_sanitario_queijaria_cicero_P003.csv', 'VALIDADE'),
+        ('laudos/laudo_inventado_P003.txt', 'LAUDO'),
+    ]

@@ -9,7 +9,7 @@ from sabor.agent.mascarador import Mascarador
 from sabor.db import conectar_readonly
 from sabor.tools import resumir_produtor
 from sabor.tools.base import SemPermissao
-from sabor.tools.resumir_produtor import _chunk_tem_nc_para_produtor
+from sabor.tools.resumir_produtor import _chunk_tem_nc_para_produtor, _mesmo_comprador
 
 
 def _ctx(conn, usuario: str = 'Dona Lúcia') -> RunContext[AgentDeps]:
@@ -123,3 +123,45 @@ def test_resumo_traz_situacao_da_certificacao_e_sie():
     )
     assert (cicero.certificacao_organica, cicero.registro_sie) == ('nao_possui', 'PE-SIE-0756')
     assert inexistente.encontrado is False and inexistente.certificacao_organica is None
+
+
+def test_resumo_diz_quem_deve_ao_produtor():
+    """F5 do Bloco 4 (REL-04): os R$ 6.020,00 vencidos do Cícero são da SuperBom."""
+    with conectar_readonly() as conn:
+        cicero = resumir_produtor(_ctx(conn), 'P003')
+        maria = resumir_produtor(_ctx(conn), 'P001')
+
+    [superbom] = cicero.pendencias_por_comprador
+    assert (superbom.comprador, superbom.vencido, superbom.a_vencer) == (
+        'Rede SuperBom Atacado', 6020.0, 0.0
+    )
+    assert superbom.maior_atraso_dias == 12
+    assert [f.referencia for f in superbom.fontes] == ['FIN-2026-013', 'FIN-2026-014']
+    assert 'Rede SuperBom Atacado: R$ 6.020,00 vencidos (12 dias de atraso)' in (
+        cicero.rascunho.conteudo
+    )
+    assert maria.pendencias_por_comprador == []  # tudo pago
+
+    # Flags determinísticas: a inadimplência é do comprador, não do produtor credor.
+    inadimplencia = [f.descricao for f in cicero.flags if f.tipo == 'inadimplencia']
+    assert len(inadimplencia) == 1
+    assert inadimplencia[0].startswith(
+        'Rede SuperBom Atacado tem R$ 6.020,00 vencidos com Cícero Romão de Almeida (P003)'
+    )
+    assert any(f.tipo == 'conformidade' and 'P003' in f.descricao for f in cicero.flags)
+    assert maria.flags == []
+
+
+@pytest.mark.parametrize(
+    'pedido,financeiro,esperado',
+    [
+        ('Rede SuperBom Atacado', 'Rede SuperBom Atacado', True),
+        ('Dona Cremilda - Lanchonete da Feira', 'Lanchonete da Feira', True),
+        ('SESC - Unidade Garanhuns', 'SESC Garanhuns', True),
+        ('SESC - Unidade Garanhuns', 'Prefeitura de Garanhuns - PNAE', False),
+        ('Rede SuperBom Atacado', 'Mercado Bom Preço', False),
+        (None, 'Mercado Bom Preço', False),
+    ],
+)
+def test_mesmo_comprador_ignora_palavras_genericas(pedido, financeiro, esperado):
+    assert _mesmo_comprador(pedido, financeiro) is esperado

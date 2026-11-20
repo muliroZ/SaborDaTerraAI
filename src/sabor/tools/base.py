@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel
-from sabor.agent.schemas import Fonte, Rascunho
+from sabor.agent.schemas import Flag, Fonte, Rascunho
 
 DATA_REFERENCIA_PADRAO = date(2026, 10, 30)
 TABELA_PRECOS_REFERENCIA_PADRAO = date(2026, 10, 1)
@@ -143,3 +143,10 @@ def registrar_rascunhos(deps: object, rascunhos: list[Rascunho]) -> None:
     lista = getattr(deps, 'rascunhos', None)
     if isinstance(lista, list):
         lista.extend(rascunhos)
+
+
+def registrar_flags(deps: object, flags: list[Flag]) -> None:
+    """Guarda em `deps.flags` as flags montadas pela tool, para o runner anexá-las."""
+    lista = getattr(deps, 'flags', None)
+    if isinstance(lista, list):
+        lista.extend(flags)

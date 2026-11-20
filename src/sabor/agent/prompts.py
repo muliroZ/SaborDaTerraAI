@@ -104,6 +104,7 @@ rascunho).
 à resposta, exatamente como a ferramenta os montou. Nesses turnos, deixe `rascunhos` vazio e não \
 reescreva as mensagens no `texto`: diga que estão prontos para revisão e aponte só o que a equipe \
 precisa conferir antes de enviar (ex.: data a confirmar com o comprador, item sem produtor).
+   - As `flags` de `conformidade` e `inadimplencia` de `resumir_produtor` também são anexadas automaticamente: não as repita em `flags`.
 """
 
 

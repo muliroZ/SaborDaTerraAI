@@ -323,6 +323,16 @@ def test_resumo_do_produtor_mostra_os_itens_triados(conn, modelo, monkeypatch):
              'unidade': 'kg', 'ambiguo': True},
         ],
     })
+    # Restaurante Raízes, comprador do pedido, já deve ao P003 (F5 do Bloco 4).
+    conn.execute(
+        """
+        INSERT INTO financeiro (id_transacao, data, produtor_id, comprador, produto, quantidade,
+                                unidade, valor_unitario, valor_total, status_pagamento,
+                                data_vencimento)
+        VALUES ('TX-T-9', '2026-09-01', 'P003', 'Restaurante Raízes', 'queijo coalho', 10, 'kg',
+                30, 300, 'pendente', '2026-10-20')
+        """
+    )
     _triar(conn)
 
     deps = _deps(conn)
@@ -336,6 +346,13 @@ def test_resumo_do_produtor_mostra_os_itens_triados(conn, modelo, monkeypatch):
     assert cicero.pedidos_em_aberto[0].data_entrega == date(2026, 11, 3)
     assert 'PED-T-003: queijo coalho — 30 kg (entrega em 03/11)' in cicero.rascunho.conteudo
     assert deps.rascunhos == [cicero.rascunho]  # registrado para o runner anexar (F3)
+    assert {p.comprador_deve_vencido for p in cicero.pedidos_em_aberto} == {300.0}
+    assert (
+        'PED-T-003 é de Restaurante Raízes, que tem R$ 300,00 vencidos com o produtor; '
+        'a alocação depende de validação da gestão.'
+    ) in cicero.alertas
+    [flag] = [f for f in cicero.flags if f.tipo == 'inadimplencia']
+    assert 'Pedidos em aberto desse comprador (PED-T-003)' in flag.descricao
     # Origem animal sem SIE: o pedido não é oferecido ao produtor.
     assert resumir_produtor(ctx, 'P011').pedidos_em_aberto == []
 

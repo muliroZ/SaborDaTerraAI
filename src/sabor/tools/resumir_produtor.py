@@ -14,13 +14,14 @@ from pydantic import BaseModel, Field
 from pydantic_ai import RunContext
 
 from sabor.agent.deps import AgentDeps
-from sabor.agent.schemas import Rascunho
+from sabor.agent.schemas import Flag, Rascunho
 from sabor.tools.base import (
     Fonte,
     SemPermissao,
     _aplicar_filtro_produtor,
     _mascarar_opcional,
     _resolver_usuario,
+    registrar_flags,
     registrar_rascunhos,
 )
 from sabor.tools.consultar_dados import consultar_financeiro
@@ -34,7 +35,20 @@ class PedidoElegivelResumo(BaseModel):
     quantidade: float | None = None
     unidade: str | None = None
     organico: bool | None = None
+    comprador_deve_vencido: float = 0.0
+    """Quanto o comprador deste pedido deve, já vencido, a este produtor (ex.: SuperBom e P003)."""
     fonte: Fonte
+
+
+class PendenciaComprador(BaseModel):
+    """Valores a receber do produtor, somados por comprador."""
+
+    comprador: str | None = None
+    vencido: float = 0.0
+    a_vencer: float = 0.0
+    maior_atraso_dias: int = 0
+    primeiro_vencimento: date | None = None
+    fontes: list[Fonte] = Field(default_factory=list)
 
 
 class ResumoProdutorResultado(BaseModel):
@@ -47,6 +61,8 @@ class ResumoProdutorResultado(BaseModel):
     total_vendido_periodo: float = 0.0
     total_pendente: float = 0.0
     total_vencido: float = 0.0
+    pendencias_por_comprador: list[PendenciaComprador] = Field(default_factory=list)
+    """Quem deve ao produtor: vencidos primeiro, do maior para o menor valor."""
     certificacao_organica: Literal['vigente', 'vencida', 'sem_validade', 'nao_possui'] | None = (
         None
     )
@@ -56,6 +72,8 @@ class ResumoProdutorResultado(BaseModel):
     """Registro sanitário (SIE) da agroindústria; nulo quando não há."""
     pedidos_em_aberto: list[PedidoElegivelResumo] = Field(default_factory=list)
     alertas: list[str] = Field(default_factory=list)
+    flags: list[Flag] = Field(default_factory=list)
+    """Conformidade e inadimplência; o runner as anexa à resposta sem depender do modelo."""
     rascunho: Rascunho | None = None
     fontes: list[Fonte] = Field(default_factory=list)
     mensagem: str | None = None
@@ -118,6 +136,36 @@ def _remover_acentos(texto: str) -> str:
     return ''.join(
         c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn'
     ).lower()
+
+
+_PALAVRAS_GENERICAS_COMPRADOR = frozenset({
+    'rede', 'atacado', 'prefeitura', 'municipal', 'mercado', 'restaurante', 'lanchonete',
+    'hotel', 'fazenda', 'unidade', 'garanhuns', 'dona', 'chef', 'produtor', 'produtora',
+})
+
+
+def _mesmo_comprador(a: str | None, b: str | None) -> bool:
+    """Compara o comprador do pedido com o do financeiro, que nem sempre têm o mesmo nome
+    ("Dona Cremilda - Lanchonete da Feira" × "Lanchonete da Feira").
+
+    Basta uma palavra distintiva em comum (4+ letras, fora das genéricas como "rede" ou
+    "garanhuns"). A comparação é só entre os compradores deste produtor, então o risco de
+    confundir dois clientes é pequeno.
+    """
+    if not a or not b:
+        return False
+    palavras_a, palavras_b = (
+        {
+            p for p in re.findall(r'[a-z0-9]{4,}', _remover_acentos(nome))
+            if p not in _PALAVRAS_GENERICAS_COMPRADOR
+        }
+        for nome in (a, b)
+    )
+    return bool(palavras_a & palavras_b)
+
+
+def _formatar_data_curta(valor: date | None) -> str:
+    return valor.strftime('%d/%m') if valor else 'sem vencimento'
 
 
 def _formatar_brl(valor: float) -> str:
@@ -261,6 +309,31 @@ def resumir_produtor(
         2,
     )
 
+    # Quem deve ao produtor, por comprador (F5 do Bloco 4): o total sozinho não diz que os
+    # R$ 6.020,00 vencidos do Cícero são da SuperBom.
+    pendencias: dict[str, PendenciaComprador] = {}
+    for item in fin_geral.itens:
+        if item.status_pagamento != 'pendente':
+            continue
+        pend = pendencias.setdefault(
+            item.comprador,
+            PendenciaComprador(comprador=_mascarar_opcional(mascarador, item.comprador)),
+        )
+        if item.vencido:
+            pend.vencido = round(pend.vencido + item.valor_total, 2)
+            pend.maior_atraso_dias = max(pend.maior_atraso_dias, item.dias_atraso)
+        else:
+            pend.a_vencer = round(pend.a_vencer + item.valor_total, 2)
+        if item.data_vencimento and (
+            pend.primeiro_vencimento is None or item.data_vencimento < pend.primeiro_vencimento
+        ):
+            pend.primeiro_vencimento = item.data_vencimento
+        pend.fontes.append(item.fonte)
+    vencidos_por_comprador = {nome: p.vencido for nome, p in pendencias.items() if p.vencido > 0}
+    pendencias_ordenadas = sorted(
+        pendencias.values(), key=lambda p: (-p.vencido, -p.a_vencer, p.comprador or '')
+    )
+
     # 3. Alertas: certificação vencendo ou vencida (P004, P008), NC ADAGRO, laudos faltando
     alertas: list[str] = []
 
@@ -399,6 +472,11 @@ def resumir_produtor(
 
             fonte_ped = Fonte(arquivo='pedidos.csv', referencia=ped_id)
             _adicionar_fonte(fonte_ped)
+            deve_vencido = round(sum(
+                valor
+                for nome, valor in vencidos_por_comprador.items()
+                if _mesmo_comprador(comprador, nome)
+            ), 2)
             pedidos_elegiveis.append(
                 PedidoElegivelResumo(
                     pedido_id=ped_id,
@@ -408,9 +486,53 @@ def resumir_produtor(
                     quantidade=float(qtd) if qtd is not None else None,
                     unidade=unidade,
                     organico=exige_org,
+                    comprador_deve_vencido=deve_vencido,
                     fonte=fonte_ped,
                 )
             )
+
+    alertas_documentais = list(alertas)
+
+    # Pedido de quem já deve ao produtor: a alocação precisa passar pela gestão.
+    pedidos_por_devedor: dict[str, list[str]] = {}
+    valor_por_devedor: dict[str, float] = {}
+    for ped in pedidos_elegiveis:
+        if ped.comprador_deve_vencido > 0 and ped.comprador:
+            ids = pedidos_por_devedor.setdefault(ped.comprador, [])
+            if ped.pedido_id not in ids:
+                ids.append(ped.pedido_id)
+            valor_por_devedor[ped.comprador] = ped.comprador_deve_vencido
+    for comprador, ids in pedidos_por_devedor.items():
+        alertas.append(
+            f"{', '.join(ids)} é de {comprador}, que tem "
+            f'{_formatar_brl(valor_por_devedor[comprador])} vencidos com o produtor; '
+            'a alocação depende de validação da gestão.'
+        )
+
+    # Flags determinísticas (F5 do Bloco 4): com dois resumos no turno, o modelo deixava de
+    # copiar as flags, e às vezes marcava como inadimplente o produtor, que é o credor.
+    rotulo = f'{nome_completo} ({prod_id})'
+    flags = [Flag(tipo='conformidade', descricao=f'{rotulo}: {a}') for a in alertas_documentais]
+    for pend in pendencias_ordenadas:
+        if pend.vencido <= 0:
+            continue
+        descricao = (
+            f'{pend.comprador} tem {_formatar_brl(pend.vencido)} vencidos com {rotulo} '
+            f'({pend.maior_atraso_dias} dias de atraso).'
+        )
+        ids = [
+            pid
+            for comprador, lista_ids in pedidos_por_devedor.items()
+            if _mesmo_comprador(comprador, pend.comprador)
+            for pid in lista_ids
+        ]
+        if ids:
+            descricao += (
+                f" Pedidos em aberto desse comprador ({', '.join(ids)}) dependem de "
+                'validação da gestão.'
+            )
+        flags.append(Flag(tipo='inadimplencia', descricao=descricao))
+    registrar_flags(ctx.deps, flags)
 
     # 5. Rascunho em formatação padrão;
     primeiro_nome = nome_completo.split()[0] if nome_completo else prod_id
@@ -425,6 +547,16 @@ def resumir_produtor(
     ]
     if fin_geral.total_vencido > 0:
         linhas_rascunho.append(f'- Valor vencido: {_formatar_brl(fin_geral.total_vencido)}')
+    for pend in pendencias_ordenadas:
+        partes = []
+        if pend.vencido > 0:
+            partes.append(
+                f'{_formatar_brl(pend.vencido)} vencidos '
+                f'({pend.maior_atraso_dias} dias de atraso)'
+            )
+        if pend.a_vencer > 0:
+            partes.append(f'{_formatar_brl(pend.a_vencer)} a vencer')
+        linhas_rascunho.append(f"  - {pend.comprador}: {'; '.join(partes)}")
 
     if pedidos_elegiveis:
         linhas_rascunho.append('')
@@ -445,7 +577,7 @@ def resumir_produtor(
 
     if alertas:
         linhas_rascunho.append('')
-        linhas_rascunho.append('Avisos e pendências documentais:')
+        linhas_rascunho.append('Avisos e pendências:')
         for alerta in alertas:
             linhas_rascunho.append(f'- {alerta}')
 
@@ -466,11 +598,13 @@ def resumir_produtor(
         total_vendido_periodo=fin_geral.total_vendido,
         total_pendente=fin_geral.total_pendente,
         total_vencido=fin_geral.total_vencido,
+        pendencias_por_comprador=pendencias_ordenadas,
         certificacao_organica=situacao_cert,
         validade_certificacao=data_val_efetiva,
         registro_sie=registro_sie,
         pedidos_em_aberto=pedidos_elegiveis,
         alertas=alertas,
+        flags=flags,
         rascunho=rascunho,
         fontes=fontes,
     )
