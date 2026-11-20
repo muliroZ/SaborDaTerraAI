@@ -10,13 +10,14 @@ Rodar com `uv run sabor` (ou `uv run streamlit run src/sabor/ui/app.py`).
 - Seletor de usuário simulado (funcionários e produtores P001…P018) no lugar da autenticação.
 - "Nova sessão" oferece o relatório da conversa anterior (#38).
 - Relatórios pedidos no chat (#15) aparecem na resposta com botão de download em Markdown.
-- "Caixa de entrada" (só equipe) mostra a fila da triagem em lote, ordenada por urgência (#14).
+- "Caixa de entrada" (só equipe) mostra a fila da triagem em lote por urgência e a dispara (#14).
 - Sugestões de perguntas em balões na área do chat, abaixo da saudação do CajAI (#56).
 - Perguntas repetidas da equipe saem do cache de respostas estáticas, sem chamar o LLM (#36).
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+import asyncio
 from dataclasses import fields
 import logging
 import threading
@@ -31,6 +32,7 @@ from sabor.agent import AgentDeps, RespostaTurno, criar_agente, processar_turno
 from sabor.agent.cache import CacheRespostas
 from sabor.agent.deps import obter_data_referencia
 from sabor.agent.guardrail_entry import obter_limites_configurados
+from sabor.agent.mascarador import Mascarador
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
 from sabor.agent.schemas import Fonte
 from sabor import triagem
@@ -67,6 +69,10 @@ CSS_PREVIA_RELATORIO = """\
 }
 </style>
 """
+
+
+class LoteEmAndamento(RuntimeError):
+    """Já existe uma triagem em lote rodando (outra aba ou clique repetido)."""
 
 
 class TurnoEmAndamento(RuntimeError):
@@ -381,8 +387,68 @@ def dialogo_relatorio(sessao_id: str) -> None:
     render_previa_relatorio(markdown, f'sessao-anterior-{sessao_id}')
 
 
+_TRAVA_LOTE = threading.Lock()
+
+
+def executar_triagem_lote(ao_processar=None) -> triagem.ResultadoLote:
+    """Roda a triagem em lote (#14) com uma conexão de escrita curta, só uma por vez."""
+    if not _TRAVA_LOTE.acquire(blocking=False):
+        raise LoteEmAndamento
+    try:
+        with conexao() as conn:
+            deps = AgentDeps(
+                conn=conn,
+                data_referencia=obter_data_referencia(),
+                usuario='triagem-lote',
+                mascarador=Mascarador(),
+            )
+            return asyncio.run(
+                triagem.triar_lote(deps, ao_processar=ao_processar)
+            )
+    finally:
+        _TRAVA_LOTE.release()
+
+
+def rodar_lote_no_dialogo() -> None:
+    """Dispara o lote a partir da caixa de entrada e resume o resultado."""
+    try:
+        with st.status('Triando pedidos…', expanded=True) as status:
+            resultado = executar_triagem_lote(
+                lambda pid, situacao: st.write(f'{pid}: {situacao}')
+            )
+            status.update(label='Triagem concluída', state='complete', expanded=False)
+    except LoteEmAndamento:
+        st.warning('Já há uma triagem em andamento; aguarde e abra a caixa de entrada de novo.')
+        return
+    except psycopg.Error:
+        logger.exception('Falha de banco na triagem em lote')
+        st.error('Não consegui gravar a triagem no banco. Tente novamente.')
+        return
+    except Exception:
+        logger.exception('Falha inesperada na triagem em lote')
+        st.error('A triagem falhou antes de terminar. O que já foi feito ficou gravado.')
+        return
+    uso = resultado.uso
+    st.success(
+        f'{len(resultado.processados)} triado(s), {len(resultado.reaproveitados)} '
+        f'reclassificado(s) sem LLM, {len(resultado.erros)} com erro, '
+        f'{len(resultado.nao_processados)} pendente(s). '
+        f'Consumo: {uso.input_tokens + uso.output_tokens} tokens.',
+        icon=':material/check_circle:',
+    )
+    if resultado.orcamento_esgotado:
+        st.warning('Orçamento de tokens do lote esgotado: rode de novo para continuar.')
+
+
 @st.dialog('Caixa de entrada', width='large')
 def dialogo_caixa_entrada() -> None:
+    if st.button(
+        'Triar pedidos pendentes',
+        icon=':material/play_arrow:',
+        help='Extrai e classifica os pedidos novos com o modelo. Pedidos já triados só '
+        'passam pelas regras, sem gastar tokens.',
+    ):
+        rodar_lote_no_dialogo()
     try:
         with conectar_readonly(tentativas=1) as conn:
             fila = triagem.listar_fila(conn)
@@ -397,7 +463,7 @@ def dialogo_caixa_entrada() -> None:
     triados = [f for f in fila if f['situacao'] == 'ok']
     if not triados:
         st.info(
-            'Nenhum pedido triado ainda. Rode `uv run python scripts/triagem_lote.py`.',
+            'Nenhum pedido triado ainda. Use "Triar pedidos pendentes".',
             icon=':material/inbox:',
         )
         return
@@ -410,7 +476,7 @@ def dialogo_caixa_entrada() -> None:
         st.warning(
             f'{sem_triagem} pedido(s) sem triagem válida (erro, mensagem alterada ou ainda não '
             'triado), no fim da fila: '
-            'rode o lote de novo ou trie manualmente.',
+            'clique em "Triar pedidos pendentes" ou trie manualmente.',
             icon=':material/warning:',
         )
 
