@@ -264,6 +264,14 @@ def test_caixa_de_entrada_so_para_a_equipe_e_ordenada_por_urgencia(agente_falso,
     assert '1 pedido(s) sem triagem' in at.warning[0].value
 
 
+def test_caixa_de_entrada_tem_o_botao_de_triar(agente_falso, conn_temporaria):
+    at = _app('Dona Lúcia')
+    _botao(at, 'Caixa de entrada').click().run()
+
+    assert not at.exception
+    assert _botao(at, 'Triar pedidos pendentes') is not None
+
+
 # ---------------------------------------------------------------------------
 # executar_turno direto (sem AppTest): conexões e gravação pelo hook da etapa 5b
 # ---------------------------------------------------------------------------
@@ -289,6 +297,28 @@ def app_modulo(monkeypatch, url_banco_temporario):
 
     monkeypatch.setattr(app, 'conexao', conexao_contada)
     return app, abertas
+
+
+def test_executar_triagem_lote_usa_conexao_de_escrita_e_so_roda_um_por_vez(
+    app_modulo, monkeypatch
+):
+    app, _ = app_modulo
+    chamadas = []
+
+    async def lote_falso(deps, **kwargs):
+        chamadas.append(deps.usuario)
+        with pytest.raises(app.LoteEmAndamento):  # segundo lote simultâneo é recusado
+            app.executar_triagem_lote()
+        return app.triagem.ResultadoLote(processados=['PED-X'])
+
+    monkeypatch.setattr(app.triagem, 'triar_lote', lote_falso)
+
+    resultado = app.executar_triagem_lote()
+
+    assert chamadas == ['triagem-lote']
+    assert resultado.processados == ['PED-X']
+    assert app._TRAVA_LOTE.acquire(blocking=False)  # liberada ao terminar
+    app._TRAVA_LOTE.release()
 
 
 def test_nenhuma_conexao_aberta_durante_a_chamada_ao_modelo(app_modulo, conn_temporaria):
