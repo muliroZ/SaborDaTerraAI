@@ -371,7 +371,7 @@ def _novo_tool_call_id() -> str:
 
 
 def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) -> None:
-    """Extrai pares `(arquivo, referencia)` reais de objetos `Fonte` nos retornos das tools."""
+    """Extrai pares `(arquivo, referencia)` reais de `Fonte` e `Pedido` nos retornos das tools."""
     if valor is None:
         return
     if isinstance(valor, dict):
@@ -380,8 +380,17 @@ def _coletar_fontes_de_retorno_tool(valor: Any, destino: list[tuple[str, str]]) 
         if isinstance(arq, str) and isinstance(ref, str) and arq.strip() and ref.strip():
             destino.append((arq.strip(), ref.strip()))
             return
-        for v in valor.values():
-            _coletar_fontes_de_retorno_tool(v, destino)
+        pedido_id = valor.get('pedido_id')
+        if isinstance(pedido_id, str) and pedido_id.strip():
+            destino.append(('pedidos.json', pedido_id.strip()))
+        produtores_elegiveis = valor.get('produtores_elegiveis')
+        if isinstance(produtores_elegiveis, (list, tuple)):
+            for pid in produtores_elegiveis:
+                if isinstance(pid, str) and pid.strip():
+                    destino.append(('produtores.csv', pid.strip()))
+        for k, v in valor.items():
+            if k not in ('pedido_id', 'produtores_elegiveis'):
+                _coletar_fontes_de_retorno_tool(v, destino)
         return
     if isinstance(valor, (list, tuple, set)):
         for item in valor:
@@ -554,6 +563,14 @@ def _chave_modelo(modelo: Model | str) -> str:
     return f'{modelo.system}:{modelo.model_name}'
 
 
+class TodosModelosEmCooldown(Exception):
+    """Nenhum modelo da cadeia está disponível até o cooldown mais próximo expirar."""
+
+    def __init__(self, retry_after_s: int) -> None:
+        self.retry_after_s = max(1, int(retry_after_s))
+        super().__init__(f'Todos os modelos estão em cooldown; tente novamente em {self.retry_after_s}s.')
+
+
 class _EstadoCircuitBreaker:
     """Estado thread-safe compartilhado entre turnos de um agente para quarentena por modelo."""
 
@@ -602,6 +619,20 @@ class _EstadoCircuitBreaker:
                     self._quarentena_ate.pop(k, None)
             return ativos
 
+    def segundos_ate_liberacao(self, chaves: Sequence[str]) -> int:
+        """Segundos até o primeiro modelo em quarentena poder receber uma tentativa."""
+        agora = self._relogio()
+        with self._lock:
+            expiracoes = [
+                self._quarentena_ate[chave]
+                for chave in chaves
+                if chave in self._quarentena_ate and self._quarentena_ate[chave] > agora
+            ]
+            for chave in list(self._quarentena_ate):
+                if self._quarentena_ate[chave] <= agora:
+                    self._quarentena_ate.pop(chave, None)
+        return max(1, math.ceil(min(expiracoes) - agora)) if expiracoes else 0
+
     def limpar(self) -> None:
         with self._lock:
             self._quarentena_ate.clear()
@@ -614,8 +645,8 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
     Mantém a ordem de `construir_modelos_padrao` (`Gemini -> Mistral -> Qwen`). Quando um
     modelo sofre falha transitória (`429`, `5xx`, timeout ou erro de rede), entra em quarentena por
     `cooldown_s` segundos: os próximos passos do mesmo turno e as perguntas seguintes
-    roteiam direto para o primeiro modelo saudável. Se todos estiverem em quarentena ou os
-    saudáveis também falharem, os modelos em quarentena ainda são tentados como último recurso.
+    roteiam direto para o primeiro modelo saudável. Se todos estiverem em quarentena, o turno
+    falha rapidamente com o tempo restante até a próxima tentativa permitida.
     """
 
     _circuit: _EstadoCircuitBreaker = field(repr=False)
@@ -690,6 +721,11 @@ class FallbackComCircuitBreaker(ModelFallback[Any]):
         if self._step != ctx.run_step:
             self._step = ctx.run_step
             saudaveis, em_quarentena = self._particionar_por_saude()
+            if not saudaveis and em_quarentena:
+                espera = self._circuit.segundos_ate_liberacao(
+                    [_chave_modelo(modelo) for modelo in em_quarentena]
+                )
+                raise TodosModelosEmCooldown(espera)
             self._remaining = [*saudaveis, *em_quarentena]
             self._attempted_models = []
             self._attempted_ids = set()

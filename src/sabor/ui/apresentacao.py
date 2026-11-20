@@ -84,6 +84,7 @@ class Destaque:
 
 
 ROTULOS_RETORNO: dict[str, Destaque] = {
+    'ACESSO_NAO_AUTORIZADO': Destaque('warning', 'Acesso não autorizado', ':material/lock:'),
     'FORA_DE_ESCOPO': Destaque('info', 'Fora de escopo', ':material/explore_off:'),
     'PROMPT_INJECTION': Destaque('warning', 'Mensagem bloqueada', ':material/gpp_bad:'),
     'ENTRADA_VAZIA': Destaque('info', 'Mensagem vazia', ':material/edit_off:'),
@@ -92,6 +93,10 @@ ROTULOS_RETORNO: dict[str, Destaque] = {
     'COTA_SESSAO_ESGOTADA': Destaque('warning', 'Cota da sessão esgotada', ':material/block:'),
     'ORCAMENTO_TURNO_ESGOTADO': Destaque(
         'warning', 'Limite do turno atingido', ':material/hourglass_disabled:'
+    ),
+    'SEM_PERMISSAO': Destaque('warning', 'Acesso restrito', ':material/lock:'),
+    'PROVEDORES_INDISPONIVEIS': Destaque(
+        'warning', 'Provedores temporariamente indisponíveis', ':material/hourglass_top:'
     ),
 }
 

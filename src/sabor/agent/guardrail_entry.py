@@ -15,6 +15,16 @@ from pydantic_ai.usage import UsageLimits
 from sabor.agent.cache import gerar_chave_cache
 from sabor.agent.schemas import RetornoAntecipado
 
+MENSAGEM_ACESSO_NAO_AUTORIZADO = (
+    'Não posso consultar nem divulgar dados de outros produtores. Você pode acessar '
+    'apenas as informações da sua própria conta. Para solicitar dados de outro '
+    'produtor, procure a equipe da cooperativa.'
+)
+MENSAGEM_SQL_INJECTION = (
+    'Não posso processar comandos destinados a alterar ou manipular o banco de dados. '
+    'Envie apenas o nome, município ou filtro que deseja consultar.'
+)
+
 logger = logging.getLogger(__name__)
 
 MENSAGEM_ESCOPO_AMIGAVEL = (
@@ -40,6 +50,20 @@ PADROES_INJECTION = [
     r"quais\s+s[ãa]o\s+as\s+suas\s+instru[çc][õo]es\s+internas",
     r"liste\s+as\s+(suas\s+)?restri[çc][õo]es",
     r"mostre\s+seu\s+system\s+prompt",
+    # Spoofing de delimitadores de chat / retornos falsos de ferramenta (INJ-14)
+    r"<\s*/?\s*(?:user|system|assistant|tool_return|tool_call|function_call)\b[^>]*>",
+    r"<\|im_(?:start|end)\|>",
+    r"\[\s*(?:admin\s+override|obs\s+interna\s+do\s+sistema)\b",
+]
+
+# SQL dinâmico não deve ser enviado pelo chat. As consultas das tools usam parâmetros,
+# mas bloquear estes padrões antes do LLM evita que uma tentativa seja tratada como filtro
+# normal e receba uma explicação improvisada do modelo.
+PADROES_SQL_INJECTION = [
+    r"(?:^|[;'\"`])\s*(?:drop|delete|update|insert|alter|truncate|create|grant|revoke)\s+"
+    r"(?:table|database|schema|role|user|from|into|set)\b",
+    r"(?:['\"]\s*)\bor\b\s*['\"]?\s*\d+\s*['\"]?\s*=\s*['\"]?\s*\d+",
+    r"\bunion\s+(?:all\s+)?select\b",
 ]
 
 TERMOS_FORA_ESCOPO = [
@@ -51,9 +75,18 @@ TERMOS_FORA_ESCOPO = [
     r"\bhor[óo]scopo\b|\bprevis[ãa]o\s+do\s+tempo\b",
 ]
 
-# Regex para detectar URLs e links externos
+# Regex para detectar URLs e links externos (com ou sem http(s)://), preservando e-mails e arquivos
 REGEX_URL = re.compile(
-    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)",
+    r"(?:"
+    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b"
+    r"(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+    r"|"
+    r"(?<![\w@./-])www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:/[^\s]*)?"
+    r"|"
+    r"(?<![\w@./-])(?:[a-zA-Z0-9-]+\.)+"
+    r"(?:com(?:\.br)?|net(?:\.br)?|org(?:\.br)?|io|app|site|xyz|online|shop|biz|info)"
+    r"(?:/[^\s]*)?\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -110,7 +143,7 @@ def _eh_gibberish(texto: str) -> bool:
     if re.search(r"[^a-zA-Z0-9À-ÿ\s]{4,}", texto_sem_divisores):
         return True
 
-    # 2. Sequências puramente randômicas sem vogais em palavras longas (ex: "asjdhfiuasdfh")
+    # 2. Sequências randômicas sem vogais ou com 5+ consoantes seguidas (ex: "asjdhfiuasdfh")
     palavras = texto_sem_divisores.split()
     palavras_sem_sentido = 0
     vogais = set("aeiouáéíóúâêîôûãõàèìòùäëïöü")
@@ -118,10 +151,11 @@ def _eh_gibberish(texto: str) -> bool:
         p_limpo = re.sub(r"[^a-zA-ZÀ-ÿ]", "", p)
         if len(p_limpo) >= 6:
             tem_vogal = any(c.lower() in vogais for c in p_limpo)
-            if not tem_vogal:
+            muitas_consoantes = bool(re.search(r"[bcdfghjklmnpqrstvwxyz]{5,}", p_limpo.lower()))
+            if not tem_vogal or muitas_consoantes:
                 palavras_sem_sentido += 1
 
-    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4 and len(palavras) <= 3:
+    if len(palavras) > 0 and (palavras_sem_sentido / len(palavras)) > 0.4:
         return True
 
     return False
@@ -152,6 +186,21 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
             ),
         )
 
+    texto_lower = texto_limpo.lower()
+
+    if any(re.search(padrao, texto_lower, re.IGNORECASE) for padrao in PADROES_SQL_INJECTION):
+        return RetornoAntecipado(
+            motivo="PROMPT_INJECTION",
+            mensagem=MENSAGEM_SQL_INJECTION,
+        )
+
+    for padrao in PADROES_INJECTION:
+        if re.search(padrao, texto_lower):
+            return RetornoAntecipado(
+                motivo="PROMPT_INJECTION",
+                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
+            )
+
     # Bloqueio de caracteres aleatórios / gibberish
     if _eh_gibberish(texto_limpo):
         return RetornoAntecipado(
@@ -161,15 +210,6 @@ def verificar_escopo_e_tamanho(texto: str) -> Optional[RetornoAntecipado]:
                 "Por favor, digite sua dúvida sobre pedidos, estoque ou relatórios operacionais."
             ),
         )
-
-    texto_lower = texto_limpo.lower()
-
-    for padrao in PADROES_INJECTION:
-        if re.search(padrao, texto_lower):
-            return RetornoAntecipado(
-                motivo="PROMPT_INJECTION",
-                mensagem=MENSAGEM_ESCOPO_AMIGAVEL,
-            )
 
     for termo in TERMOS_FORA_ESCOPO:
         if re.search(termo, texto_lower):
@@ -232,6 +272,27 @@ def criar_retorno_orcamento_turno() -> RetornoAntecipado:
     )
 
 
+def verificar_acesso_produtor(
+    texto: str, perfil: str = 'funcionario', produtor_id: str | None = None
+) -> RetornoAntecipado | None:
+    """Bloqueia antes do LLM consultas de produtor sobre outro produtor identificado por ID."""
+    if perfil != 'produtor' or not produtor_id:
+        return None
+    padroes = (
+        r'\bP\s*0*(\d{1,3})\b',
+        r'\bprodutor(?:a)?\s+(?:id\s*)?0*(\d{1,3})\b',
+    )
+    alvos = set()
+    for padrao in padroes:
+        alvos.update(f'P{int(m):03d}' for m in re.findall(padrao, texto, re.IGNORECASE))
+    if alvos - {produtor_id.upper()}:
+        return RetornoAntecipado(
+            motivo='ACESSO_NAO_AUTORIZADO',
+            mensagem=MENSAGEM_ACESSO_NAO_AUTORIZADO,
+        )
+    return None
+
+
 def executar_guardrail_entrada(
     mensagem: str,
     dataset_version: str = "default",
@@ -239,9 +300,14 @@ def executar_guardrail_entrada(
     cache_repo: Optional[Any] = None,
     *,
     perfil: str = "funcionario",
+    produtor_id: str | None = None,
     data_referencia: date | str | None = None,
 ) -> Optional[RetornoAntecipado]:
     """Executa 2a -> 2b -> 2c em sequência. Retorna None se a entrada estiver liberada."""
+    bloqueio = verificar_acesso_produtor(mensagem, perfil, produtor_id)
+    if bloqueio:
+        return bloqueio
+
     bloqueio = verificar_escopo_e_tamanho(mensagem)
     if bloqueio:
         return bloqueio

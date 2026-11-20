@@ -223,3 +223,129 @@ def test_guardrail_saida_4b_rejeita_fonte_nao_retornada_no_turno():
     )
     assert any('4B_SEM_FONTE_FACTUAL' in r for r in regras)
     assert res_proc.fontes == []
+
+
+def test_guardrail_saida_4a_bloqueia_evasao_lexical_em_rascunho_p017():
+    """INJ-15: voz passiva ('serão entregues') e 'separados' em rascunho de P017 são bloqueados."""
+    resposta = RespostaAgente(
+        texto='Recado preparado.',
+        rascunhos=[
+            Rascunho(
+                destinatario='Hotel Fazenda',
+                canal='whatsapp',
+                conteudo=(
+                    'Prezado Hotel Fazenda, informamos que os 40 kg de frango do produtor P017 '
+                    'já se encontram separados e serão entregues no caminhão de domingo.'
+                ),
+            )
+        ],
+    )
+    res_proc, regras = processar_guardrail_saida(resposta, conn=_ConexaoPsycopgFalsa())
+    assert any('4A_BLOQUEIO_SANITARIO' in r for r in regras)
+    assert res_proc.rascunhos == []
+    assert 'Bloqueio operacional' in res_proc.texto
+
+
+class _ConexaoInspecaoMultiProdutor:
+    """Replica a estrutura real de `inspecao_adagro_2026.txt` (P001..P005 regulares + P017)."""
+
+    __module__ = 'psycopg.connection'
+
+    _CHUNK_VISTORIADOS = """\
+PRODUTORES VISTORIADOS (amostragem):
+
+  1. P001 - Maria das Graças S. Ferreira (Garanhuns)
+     Produtos: Goiaba, acerola, manga
+     Situação: REGULAR
+
+  2. P002 - José Antônio dos Santos (Brejão)
+     Produtos: Mel silvestre, mel de jandaíra, própolis
+     Registro SIE casa do mel: VIGENTE (PE-SIE-0892)
+     Situação: REGULAR
+
+  3. P003 - Cícero Romão de Almeida (Caetés)
+     Produtos: Queijo coalho, queijo manteiga, ricota
+     Registro SIE queijaria: VIGENTE (PE-SIE-0756)
+     Situação: REGULAR
+
+  5. P017 - Wellington da Silva Monteiro (Garanhuns)
+     Produtos: Frango caipira, ovos caipira
+     Registro SIE: NÃO POSSUI
+     Situação: IRREGULAR - Produtor de frango caipira sem registro
+     no Serviço de Inspeção. Comercialização limitada a venda
+     direta ao consumidor final até regularização.
+"""
+
+    _CHUNK_NC = """\
+NÃO CONFORMIDADES:
+  NC-001 (GRAVE): Produtor P017 (frango caipira) sem registro SIE.
+    Ação: Cooperativa deve suspender a intermediação de frango caipira
+    até que o produtor obtenha o registro junto ao SIE municipal.
+    Prazo: Imediato.
+    NOTA: Ovos não exigem SIE para venda direta ao consumidor.
+"""
+
+    def execute(self, query: str, params=None):
+        sql = ' '.join(query.lower().split())
+        if 'from produtores' in sql:
+            return _CursorFalso([])
+        if 'from chunks' in sql:
+            return _CursorFalso([(self._CHUNK_VISTORIADOS, None), (self._CHUNK_NC, None)])
+        if 'from produtos' in sql:
+            return _CursorFalso(
+                [
+                    ('Queijo coalho',),
+                    ('Mel silvestre',),
+                    ('Frango caipira',),
+                    ('Ovos caipira',),
+                ]
+            )
+        return _CursorFalso([])
+
+
+def test_guardrail_saida_4a_nao_contamina_produtores_regulares_no_mesmo_chunk():
+    """Regressão (PED-2026-015/PED-2026-003): chunk de inspeção com P001..P005 regulares
+    e P017 irregular não pode bloquear queijo coalho (P003), mel (P002) ou ovos caipira."""
+    conn = _ConexaoInspecaoMultiProdutor()
+
+    for texto_regular, ref in (
+        ('Podemos fornecer 200 kg de queijo coalho do produtor P003 (SIE vigente).', 'P003'),
+        ('Confirmamos disponibilidade de mel silvestre do produtor P002.', 'P002'),
+        ('Podemos entregar ovos caipira sem restrição de SIE.', 'ovos'),
+    ):
+        resp = RespostaAgente(
+            texto=texto_regular,
+            fontes=[Fonte(arquivo='produtores.csv', referencia=ref)],
+        )
+        res_proc, regras = processar_guardrail_saida(
+            resp,
+            conn=conn,
+            data_referencia=date(2026, 10, 30),
+            fontes_retornadas_no_turno=[f'produtores.csv · {ref}'],
+        )
+        assert regras == [], f'Bloqueio indevido para: {texto_regular}'
+        assert res_proc.texto == texto_regular
+
+    resp_frango = RespostaAgente(
+        texto='Podemos entregar 40 kg de frango caipira do produtor P017 amanhã.',
+    )
+    _, regras_frango = processar_guardrail_saida(
+        resp_frango, conn=conn, data_referencia=date(2026, 10, 30)
+    )
+    assert any('4A_BLOQUEIO_SANITARIO' in r for r in regras_frango)
+
+
+def test_guardrail_saida_4a_permite_queijo_p003_no_banco_real(conn_banco_ou_pula):
+    """Integração: P003 e queijo coalho (regulares no relatório ADAGRO) não são bloqueados."""
+    resp = RespostaAgente(
+        texto='Podemos fornecer 200 kg de queijo coalho pelo produtor P003.',
+        fontes=[Fonte(arquivo='pedidos.json', referencia='PED-2026-015')],
+    )
+    res_proc, regras = processar_guardrail_saida(
+        resp,
+        conn=conn_banco_ou_pula,
+        data_referencia=date(2026, 10, 30),
+        fontes_retornadas_no_turno=['pedidos.json · PED-2026-015'],
+    )
+    assert regras == []
+    assert 'queijo coalho' in res_proc.texto

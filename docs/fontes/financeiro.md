@@ -1,6 +1,6 @@
 # `financeiro.csv` — Transações financeiras
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Registro das vendas intermediadas pela cooperativa entre **02/09/2026 e 25/10/2026**, com status de recebimento. Cada linha é **um produto vendido por um produtor a um comprador**; um mesmo pedido gera várias linhas.
 

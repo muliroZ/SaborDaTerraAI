@@ -1,58 +1,121 @@
-# SaborDaTerraAI
+# CajAI
 
-Assistente de IA para a cooperativa Sabor da Terra. A documentação dos dados e do projeto está em [docs/](docs/README.md).
+Assistente de IA operacional para a cooperativa **Sabor da Terra**, criado para apoiar a equipe e os produtores (`P001`…`P018`) na triagem de pedidos, verificação sanitária e contratual, consulta financeira e redação de notificações sem envio automático.
 
-## Banco de dados (PostgreSQL + pgvector)
+O sistema combina **extração estruturada + regras determinísticas** com **busca híbrida em documentos** (pgvector + `tsvector`), **guardrails de entrada e saída**, **mascaramento de dados pessoais (LGPD/PII)**, **fallback entre modelos** e **cache de respostas estáticas**.
 
-Requer Docker e [uv](https://docs.astral.sh/uv/).
+---
 
-```bash
-cp .env.example .env              # opcional: os valores vazios usam os padrões
-docker compose up -d              # sobe o Postgres 17 com pgvector (volume `pgdata`)
-uv run python scripts/init_db.py  # cria o schema vazio (idempotente)
-uv run python scripts/etl.py      # insere os dados nas tabelas correspondentes (idempotente)
-uv run python scripts/etl.py      # executa o ETL completo, populando as tabelas 
-uv run python scripts/ingest_docs.py # ingere documentos, gera embeddings, completa as tabelas
+## Mapa da Documentação
+
+| Onde está | O que contém |
+| :--- | :--- |
+| **[docs/projeto.md](docs/projeto.md)** | Visão geral do desafio, escopo funcional, personas e critérios de negócio do CajAI. |
+| **[docs/dados_gerais.md](docs/dados_gerais.md)** | Índice geral da documentação técnica e dos datasets da cooperativa. |
+| **[docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md)** | Arquitetura em nuvem, mapeamento local → GCP (Cloud Run, Cloud SQL, Secret Manager) e passo a passo de deploy. |
+| **[docs/Arquitetura de Solução e Decisões Técnicas — SaborDaTerraAI.pdf](docs/Arquitetura%20de%20Solução%20e%20Decisões%20Técnicas%20—%20SaborDaTerraAI.pdf)** | Documento consolidado de arquitetura da solução e justificativas técnicas. |
+| **[docs/diagramas/](docs/diagramas/)** | Diagramas de visão geral, arquitetura do agente e modelo Entidade-Relacionamento (`.jpeg` e `.drawio`). |
+| **[docs/dev/](docs/dev/)** | Especificações internas de implementação: [agente e fallback](docs/dev/agente_e_fallback.md), [mascaramento LGPD/PII](docs/dev/mascaramento_pii.md), [observabilidade](docs/dev/observabilidade.md) e [triagem em lote](docs/dev/triagem_lote.md). |
+| **[docs/fontes/](docs/fontes/)** | Dicionário e regras de negócio das bases de dados (`produtores`, `pedidos`, `certificacoes`, `contratos`, `financeiro`, `lotes`, `fichas_tecnicas`, `sazonalidade`, `tabela_precos`). |
+
+---
+
+## Estrutura do Projeto e da Documentação
+
+```text
+.
+├── README.md
+├── pyproject.toml
+├── docker-compose.yml
+├── scripts/                  # init_db.py, etl.py, ingest_docs.py, triagem_lote.py, cache, etc;
+├── src/sabor/
+│   ├── agent/                # runner, guardrails (entrada/saída), schemas, fallback, etc;
+│   ├── tools/                # ferramentas de pedidos, regras, relatórios, notificações, etc;
+│   ├── sql/                  # schema.sql (PostgreSQL 17 + pgvector + tsvector);
+│   └── ui/                   # interface web em Streamlit (uv run sabor);
+├── tests/                    # testes unitários e de integração;
+└── docs/
+    ├── projeto.md
+    ├── dados_gerais.md
+    ├── arquitetura/          # deploy_gcp.md e PDF de arquitetura
+    ├── diagramas/            # Visao_Geral.jpeg, Agent-System.jpeg, ER-Diagram.jpeg e .drawio
+    ├── dev/                  # guias técnicos (agente/fallback, PII, observabilidade, triagem)
+    └── fontes/               # documentação das tabelas e arquivos de dados da cooperativa
 ```
 
-- `uv run python scripts/init_db.py --reset` apaga as tabelas do projeto e recria o schema do zero.
-- `uv run python scripts/etl.py` apaga os dados das tabelas e reseta os indices seriais.
-- `docker compose down -v` derruba o banco e remove o volume.
-- O DDL está em [`src/sabor/sql/schema.sql`](src/sabor/sql/schema.sql). As quantidades das fontes (`quantidade_kg`) ficam em `quantidade` + `unidade` (`kg`, `unidade`, `dúzia`, `maço`, `litro`), e os chunks dos TXT têm `embedding vector(768)` com índice HNSW (cosseno) e `tsvector` para busca híbrida.
-- `uv run pytest` roda os testes; os de integração usam um banco temporário e são pulados se o Postgres estiver fora do ar.
+---
 
-## Interface (Streamlit)
+## Arquitetura e Diagramas
+
+### Visão Geral da Solução
+![Visão Geral da Arquitetura](docs/diagramas/Visao_Geral.jpeg)
+
+### Arquitetura do Agente e Fluxo de Turno
+![Arquitetura do Sistema de Agente](docs/diagramas/Agent-System.jpeg)
+
+### Modelo de Dados (ER)
+![Diagrama Entidade-Relacionamento](docs/diagramas/ER-Diagram.jpeg)
+
+*(Os arquivos editáveis `.drawio` também estão disponíveis em [`docs/diagramas/`](docs/diagramas/).)*
+
+---
+
+## Início Rápido (Local)
+
+Requer **Docker** e **[uv](https://docs.astral.sh/uv/)**.
+
+### 1. Banco de dados e carga inicial (PostgreSQL 17 + pgvector)
 
 ```bash
-uv run python scripts/init_db.py  # cria também as tabelas `sessoes` e `mensagens`
-uv run sabor                      # abre http://localhost:8501 (equivale a `streamlit run src/sabor/ui/app.py`)
+cp .env.example .env                  # opcional: valores vazios usam os padrões
+docker compose up -d                  # sobe o Postgres 17 com pgvector (volume `pgdata`)
+uv run python scripts/init_db.py      # cria todas as tabelas do schema (idempotente)
+uv run python scripts/etl.py          # popula as tabelas estruturadas (reseta dados e índices)
+uv run python scripts/ingest_docs.py  # ingere documentos e gera embeddings (vector 768 + tsvector)
 ```
 
-Escolha um usuário simulado na barra lateral (equipe da cooperativa ou produtor `P001`…`P018`) e converse pelo chat. A conversa fica no banco: recarregar a página retoma a sessão, e "Nova sessão" oferece o relatório da conversa anterior.
+- **Reset completo do schema:** `uv run python scripts/init_db.py --reset`
+- **Derrubar banco e volume:** `docker compose down -v`
+- **DDL e busca híbrida:** definidos em [`src/sabor/sql/schema.sql`](src/sabor/sql/schema.sql) (embeddings `vector(768)` com índice HNSW cosseno + `tsvector`).
+- **Testes:** `uv run pytest` (testes de integração usam banco temporário e são ignorados se o Postgres estiver parado).
+
+### 2. Interface Web (Streamlit)
+
+```bash
+uv run sabor  # abre http://localhost:8501 (equivale a `streamlit run src/sabor/ui/app.py`)
+```
+
+- Selecione o perfil na barra lateral (**Equipe da cooperativa** ou produtor **`P001`…`P018`**).
+- As sessões e mensagens são persistidas no PostgreSQL; recarregar a página retoma a conversa e **"Nova sessão"** gera o relatório de encerramento.
+
+---
+
+## Operações e Recursos Principais
 
 ### Cache de respostas estáticas
-
-Perguntas autocontidas da equipe (ex.: "Como armazenar queijo coalho?") ficam na tabela `UNLOGGED` `cache_respostas` e, repetidas em outra sessão, voltam sem chamar o LLM (selo "Resposta do cache", mesmas fontes). Respostas com dados pessoais, rascunhos, relatórios, bloqueios do guardrail ou do perfil produtor não entram no cache. A chave inclui a versão do dataset, então uma nova carga de dados invalida o cache sozinha.
+Perguntas autocontidas da equipe (ex.: *"Como armazenar queijo coalho?"*) são armazenadas na tabela `UNLOGGED` `cache_respostas` (TTL configurado via `CACHE_TTL_S` no `.env`, padrão `24h`; `0` desativa) e reutilizadas sem custo de LLM. Respostas com PII, rascunhos, relatórios, bloqueios de guardrail ou consultas de perfil produtor não são cacheadas, e qualquer nova carga invalida a versão do dataset automaticamente.
 
 ```bash
-uv run python scripts/atualizar_versao_dataset.py  # publica a versão do dataset (ETL e ingestão já fazem isso)
-uv run python scripts/limpar_cache.py              # esvazia o cache (--expirados: só as vencidas)
+uv run python scripts/atualizar_versao_dataset.py  # força atualização da versão do dataset
+uv run python scripts/limpar_cache.py              # limpa o cache (--expirados remove apenas vencidos)
 ```
 
-O TTL é `CACHE_TTL_S` no `.env` (padrão 24 h; `0` desliga o cache). Detalhes em [docs/dev/agente_e_fallback.md](docs/dev/agente_e_fallback.md).
+Detalhes em [docs/dev/agente_e_fallback.md](docs/dev/agente_e_fallback.md).
 
-## Triagem em lote da caixa de entrada
+### Triagem em lote da caixa de entrada
+Processa pedidos fora do chat via `extrair_e_classificar_pedido`, grava na tabela `triagem_pedidos` e ordena a fila por urgência (`crítica → baixa`, com erros/pendências ao final). Pedidos já extraídos reaproveitam a extração sem gastar tokens, reexecutando apenas as regras determinísticas sobre o banco atual.
 
 ```bash
-uv run python scripts/init_db.py                                  # cria a tabela `triagem_pedidos`
 uv run python scripts/triagem_lote.py --csv fila.csv --json fila.json
 ```
 
-Roda `extrair_e_classificar_pedido` em todos os `pedidos`, fora do chat, grava em `triagem_pedidos` e mostra a fila ordenada por urgência (crítica → baixa; erros, desatualizados e pendentes no fim). Pedidos já extraídos não voltam ao LLM, mas as regras rodam de novo sobre o banco atual sem gastar tokens; cada pedido respeita o orçamento do turno (`TURNO_TOKENS_LIMIT`/`TURNO_REQUEST_LIMIT`) e o lote tem teto próprio (`TRIAGEM_TOKENS_LIMIT`, padrão 150 mil tokens). Opções: `--limite N`, `--tokens N`, `--reprocessar` e `--somente-exportar` (sem LLM). Na interface, a equipe vê a fila em "Caixa de entrada" e pode disparar o lote pelo botão "Triar pedidos pendentes". Detalhes em [docs/dev/triagem_lote.md](docs/dev/triagem_lote.md).
+Opções disponíveis: `--limite N`, `--tokens N`, `--reprocessar` e `--somente-exportar` (sem LLM). Na UI, a equipe acompanha a fila em **"Caixa de entrada"**. Detalhes em [docs/dev/triagem_lote.md](docs/dev/triagem_lote.md).
 
-## Tudo em Docker (Plano B da demo)
+---
 
-A aplicação também roda em container, com a mesma imagem usada no Cloud Run. O serviço `app` fica no perfil `app`, então `docker compose up -d` continua subindo só o banco.
+## Execução Completa em Docker (Plano B / Demo)
+
+Utiliza a mesma imagem do Cloud Run (serviço `app` isolado no profile `app`, mantendo `docker compose up -d` restrito ao banco):
 
 ```bash
 docker compose --profile app build
@@ -60,7 +123,5 @@ docker compose up -d db
 docker compose --profile app run --rm app python scripts/init_db.py
 docker compose --profile app run --rm app python scripts/etl.py
 docker compose --profile app run --rm app python scripts/ingest_docs.py
-docker compose --profile app up -d   # http://localhost:8501 (APP_PORT no .env muda a porta)
+docker compose --profile app up -d   # http://localhost:8501 (ajustável via APP_PORT no .env)
 ```
-
-O mapeamento local → GCP (Cloud Run + Cloud SQL + Secret Manager) e o passo a passo do deploy, executado em 19/11/2026, estão em [docs/arquitetura/deploy_gcp.md](docs/arquitetura/deploy_gcp.md).

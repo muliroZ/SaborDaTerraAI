@@ -1,4 +1,4 @@
-# Observabilidade do agente: traces do turno (#39)
+# Observabilidade do agente: traces do turno
 
 Etapa **5c** do diagrama *Agent System*: cada turno vira um trace no **Cloud Trace**, com as chamadas ao modelo, as ferramentas, os tokens e a latência. O código fica em [`src/sabor/observabilidade.py`](../../src/sabor/observabilidade.py).
 

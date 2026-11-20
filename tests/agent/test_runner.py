@@ -909,3 +909,137 @@ def test_anexar_relatorios_mantem_relatorio_quando_gerar_relatorio_rodou():
 
     descartada = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=False)
     assert descartada.relatorios == []
+
+
+def test_regra_4b_aceita_fonte_de_extrair_e_classificar_pedido():
+    """Regressão: retorno `Pedido` de `extrair_e_classificar_pedido` fornece fontes
+    `pedidos.json · PED-...` e `produtores.csv · P...` para a Regra 4b."""
+    from pydantic_ai import RunContext
+    from pydantic_ai.messages import ToolReturnPart
+
+    from sabor.tools.pedidos import Item, Pedido
+
+    def extrair_e_classificar_pedido_fake(
+        ctx: RunContext[AgentDeps], pedido_id: str | None = None
+    ) -> Pedido:
+        return Pedido(
+            tipo='compra',
+            pedido_id=pedido_id or 'PED-2026-015',
+            itens=[
+                Item(
+                    produto_texto='queijo coalho',
+                    produto='queijo coalho',
+                    quantidade=200,
+                    unidade='kg',
+                    produtores_elegiveis=['P003'],
+                )
+            ],
+        )
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if not ja_chamou:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name='extrair_e_classificar_pedido_fake',
+                        args={'pedido_id': 'PED-2026-015'},
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='final_result',
+                    args={
+                        'texto': 'O pedido PED-2026-015 solicita 200 kg de queijo coalho (P003).',
+                        'fontes': [
+                            {'arquivo': 'pedidos.json', 'referencia': 'PED-2026-015'},
+                            {'arquivo': 'produtores.csv', 'referencia': 'P003'},
+                        ],
+                    },
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[extrair_e_classificar_pedido_fake],
+    )
+    turno = processar_turno(
+        'sess-4b-pedido',
+        'Analise o PED-2026-015',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock()),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.bloqueado_guardrail is False
+    assert turno.regras_disparadas == []
+    assert '200 kg de queijo coalho' in turno.texto
+    assert len(turno.fontes) == 2
+
+
+def test_sem_permissao_retorna_acesso_restrito_sem_falha_segura():
+    """Regressão (INJ-17): `SemPermissao` de uma tool vira retorno `SEM_PERMISSAO`,
+    nunca `falha_segura` vermelha."""
+    from pydantic_ai import RunContext
+
+    from sabor.tools.base import SemPermissao
+
+    def rascunhar_notificacao_fake(ctx: RunContext[AgentDeps], pedido_id: str) -> str:
+        raise SemPermissao('Apenas membros da equipe podem consultar pedidos.')
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name='rascunhar_notificacao_fake',
+                    args={'pedido_id': 'PED-2026-004'},
+                )
+            ]
+        )
+
+    agente = criar_agente(
+        [FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)],
+        tools=[rascunhar_notificacao_fake],
+    )
+    turno = processar_turno(
+        'sess-rbac',
+        'Rascunhe a notificação do PED-2026-004',
+        usuario='P001',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), usuario='P001'),
+        guardrail_entrada=lambda _msg: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.bloqueado_guardrail is True
+    assert turno.retorno_antecipado is not None
+    assert turno.retorno_antecipado.motivo == 'SEM_PERMISSAO'
+    assert 'Apenas membros da equipe' in turno.texto
+
+
+def test_normalizar_resposta_desescapa_quebras_linha_em_rascunhos():
+    """Sequências literais `\\n` devolvidas pelo LLM em rascunhos viram quebras de linha reais."""
+    from sabor.agent.runner import _normalizar_fontes_e_texto_resposta
+    from sabor.agent.schemas import Rascunho, RespostaAgente
+
+    resposta = RespostaAgente(
+        texto='Rascunho pronto.\\nConfira abaixo.',
+        rascunhos=[
+            Rascunho(
+                destinatario='Hospital São Francisco',
+                canal='email',
+                conteudo='Prezada Rosangela,\\n\\nEm atenção à cotação,\\nAtenciosamente.',
+            )
+        ],
+    )
+    normalizada = _normalizar_fontes_e_texto_resposta(resposta)
+
+    assert normalizada.texto == 'Rascunho pronto.\nConfira abaixo.'
+    assert normalizada.rascunhos[0].conteudo == (
+        'Prezada Rosangela,\n\nEm atenção à cotação,\nAtenciosamente.'
+    )

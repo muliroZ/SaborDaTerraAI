@@ -22,6 +22,7 @@ from sabor.agent.fallback import (
     MODELO_PRIMARIO,
     TIMEOUT_POR_MODELO_S,
     FallbackComCircuitBreaker,
+    TodosModelosEmCooldown,
     construir_capability_fallback,
     construir_modelos_padrao,
     deve_fazer_fallback_excecao,
@@ -457,7 +458,7 @@ def test_circuit_breaker_usa_quarentenado_como_ultimo_recurso_se_saudavel_falhar
     assert chamadas == ['gemini', 'qwen', 'qwen', 'gemini', 'gemini']
 
 
-def test_circuit_breaker_todos_em_quarentena_tenta_cadeia_novamente():
+def test_circuit_breaker_todos_em_quarentena_falha_rapido_sem_novas_chamadas():
     agora = [0.0]
     chamadas: list[str] = []
 
@@ -476,9 +477,10 @@ def test_circuit_breaker_todos_em_quarentena_tenta_cadeia_novamente():
     with pytest.raises(FallbackExceptionGroup):
         agente.run_sync('p1')
     agora[0] = 10.0
-    with pytest.raises(FallbackExceptionGroup):
+    with pytest.raises(TodosModelosEmCooldown) as exc_info:
         agente.run_sync('p2')
-    assert chamadas == ['gemini', 'qwen', 'gemini', 'qwen']
+    assert exc_info.value.retry_after_s == 170
+    assert chamadas == ['gemini', 'qwen']
 
 
 def test_circuit_breaker_desligado_com_cooldown_zero():

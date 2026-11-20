@@ -154,9 +154,13 @@ async def rascunhar_notificacao(
     - texto_pedido: Texto bruto opcional de um novo pedido não gravado na base de dados.
 
     Quando usar:
-    - Use esta ferramenta SEMPRE que o operador solicitar o rascunho de mensagens,
-      notificações ou propostas de distribuição de um pedido entre produtores aptos
-      que atendem aos critérios de safra, capacidade e conformidade sanitária.
+    - Use esta ferramenta SOMENTE quando o operador solicitar o rascunho de notificações
+      ou propostas de alocação de um pedido **para produtores cooperados** aptos que
+      atendem aos critérios de safra, capacidade e conformidade sanitária.
+    - NÃO use esta ferramenta para redigir respostas a compradores/clientes (como cotações,
+      respostas comerciais ou solicitações de dados/documentos). Para responder a um
+      comprador, consulte o pedido com `extrair_e_classificar_pedido` e escreva o rascunho
+      diretamente em `rascunhos` da resposta final.
     """
     usuario_raw = getattr(ctx.deps, "usuario", None)
     usuario_obj = _resolver_usuario(usuario_raw if usuario_raw is not None else "funcionario")

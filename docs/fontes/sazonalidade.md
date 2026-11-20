@@ -1,6 +1,6 @@
 # `sazonalidade.csv` — Calendário de disponibilidade
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Matriz de disponibilidade de cada produto por mês. Serve para dizer se um produto pode ser fornecido numa data e para ajustar expectativas de volume. É qualitativa: não informa quantidade. A capacidade em kg está nas [fichas técnicas](fichas_tecnicas.md).
 

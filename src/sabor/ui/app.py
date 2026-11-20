@@ -34,7 +34,6 @@ from sabor.agent.deps import obter_data_referencia
 from sabor.agent.guardrail_entry import obter_limites_configurados
 from sabor.agent.mascarador import Mascarador
 from sabor.agent.runner import MENSAGEM_FALHA_SEGURA
-from sabor.agent.schemas import Fonte
 from sabor import triagem
 from sabor.db import conectar, conectar_readonly
 from sabor.observabilidade import configurar_observabilidade
@@ -136,16 +135,6 @@ def nomes_produtores() -> dict[str, str]:
             return dict(conn.execute('SELECT id, nome_completo FROM produtores').fetchall())
     except psycopg.Error:
         return {}
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def trechos(fontes_json: tuple[str, ...], usuario_id: str) -> list[str | None]:
-    fontes = [Fonte.model_validate_json(f) for f in fontes_json]
-    try:
-        with conectar_readonly(tentativas=1) as conn:
-            return [ap.buscar_trecho(conn, f, usuario_id) for f in fontes]
-    except psycopg.Error:
-        return [None] * len(fontes)
 
 
 # ---------------------------------------------------------------------------
@@ -268,17 +257,18 @@ def enviar(mensagem: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_fontes(turno: RespostaTurno, usuario_id: str) -> None:
+def render_fontes(turno: RespostaTurno) -> None:
     if not turno.fontes:
         return
-    with st.expander(f'Fontes ({len(turno.fontes)})', icon=':material/description:'):
-        achados = trechos(tuple(f.model_dump_json() for f in turno.fontes), usuario_id)
-        for fonte, trecho in zip(turno.fontes, achados):
-            st.markdown(f'**`{fonte.formatar()}`**')
-            if trecho:
-                st.text(trecho)
-            else:
-                st.caption('Trecho não disponível para exibição.')
+    nomes_arquivos = list(
+        dict.fromkeys(
+            fonte.arquivo.replace('\\', '/').rsplit('/', 1)[-1]
+            for fonte in turno.fontes
+        )
+    )
+    with st.expander(f'Fontes ({len(nomes_arquivos)})', icon=':material/description:'):
+        for nome in nomes_arquivos:
+            st.markdown(f'- `{nome}`')
 
 
 def render_flags(turno: RespostaTurno) -> None:
@@ -334,7 +324,7 @@ def render_resposta(turno: RespostaTurno, usuario_id: str, chave: str = 'atual')
     render_flags(turno)
     render_relatorios(turno, chave)
     render_rascunhos(turno)
-    render_fontes(turno, usuario_id)
+    render_fontes(turno)
 
     meta = []
     if turno.modelo_efetivo:

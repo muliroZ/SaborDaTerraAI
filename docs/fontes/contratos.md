@@ -1,6 +1,6 @@
 # `contratos/` — Contratos com compradores
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Três contratos em texto livre com os principais compradores. Definem preços (só no PNAE), condições de pagamento, janelas de entrega, exigências documentais e penalidades. Prevalecem sobre a tabela de preços e sobre o que a mensagem do cliente afirmar.
 

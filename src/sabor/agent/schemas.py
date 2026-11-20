@@ -93,10 +93,13 @@ EarlyReturnList = Literal[
     "ENTRADA_VAZIA",
     "TAMANHO_EXCEDIDO",
     "FORA_DE_ESCOPO",
+    "ACESSO_NAO_AUTORIZADO",
     "PROMPT_INJECTION",
     "CACHE_HIT",
     "COTA_SESSAO_ESGOTADA",
     "ORCAMENTO_TURNO_ESGOTADO",
+    "SEM_PERMISSAO",
+    "PROVEDORES_INDISPONIVEIS",
 ]
 
 class RetornoAntecipado(BaseModel):

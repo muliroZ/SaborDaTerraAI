@@ -1,6 +1,6 @@
 # `produtores.csv` — Cadastro de produtores
 
-[← Visão geral](../README.md)
+[← Visão geral](../dados_gerais.md)
 
 Cadastro mestre dos 18 produtores cooperados. É a **tabela de referência** do conjunto: `financeiro.csv` e `lotes.csv` apontam para ela pelo `id`, e os certificados e laudos citam o mesmo ID no nome do arquivo.
 
