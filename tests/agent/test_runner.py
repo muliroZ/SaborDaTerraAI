@@ -909,3 +909,108 @@ def test_anexar_relatorios_mantem_relatorio_quando_gerar_relatorio_rodou():
 
     descartada = _anexar_relatorios(resposta, deps_com_relatorio(), gerar_relatorio_chamado=False)
     assert descartada.relatorios == []
+
+
+def _modelo_chama_tools_e_responde(chamadas: list[ToolCallPart], final: dict):
+    """FunctionModel que faz `chamadas` no primeiro passo e devolve `final` no seguinte."""
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if chamadas and not ja_chamou:
+            return ModelResponse(parts=list(chamadas))
+        return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args=final)])
+
+    return FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)
+
+
+RASCUNHO_INVENTADO = {
+    'destinatario': 'Maria das Graças (P001)',
+    'canal': 'whatsapp',
+    'conteudo': 'Olá! Preciso de maracujá/goiaba conforme alocação.',
+}
+
+
+def test_rascunhos_das_tools_substituem_os_redigitados_pelo_modelo():
+    """F3 do Bloco 4: o rascunho anexado é o da tool, mascarado e sem duplicata."""
+    from sabor.agent.schemas import Rascunho
+    from sabor.tools.base import registrar_rascunhos
+
+    conteudo_tool = 'Olá, Maria (P001)!\n\nPedidos em aberto:\n- PED-2026-002: goiaba — 50 kg\nCPF 111.222.333-44'
+
+    def resumir_produtor(ctx: RunContext[AgentDeps], produtor: str) -> dict:
+        registrar_rascunhos(
+            ctx.deps,
+            [Rascunho(destinatario='Maria das Graças (P001)', canal='padrao', conteudo=conteudo_tool)],
+        )
+        return {'produtor_id': 'P001'}
+
+    chamada = ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P001'})
+    agente = criar_agente(
+        [
+            _modelo_chama_tools_e_responde(
+                [chamada, ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P001'})],
+                {'texto': 'Resumo pronto.', 'rascunhos': [RASCUNHO_INVENTADO]},
+            )
+        ],
+        tools=[resumir_produtor],
+    )
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-rasc', 'resuma a Maria', agente=agente, deps=deps, guardrail_entrada=lambda _m: None
+    )
+
+    assert turno.falha_segura is False
+    [rascunho] = turno.rascunhos  # a tool rodou duas vezes com o mesmo resultado
+    assert rascunho.canal == 'padrao'
+    assert 'PED-2026-002: goiaba — 50 kg' in rascunho.conteudo
+    assert 'maracujá' not in rascunho.conteudo
+    assert '[CPF_MASCARADO]' in rascunho.conteudo  # mascarado e não restaurado
+    assert deps.rascunhos == []  # não vaza para o próximo turno
+
+
+def test_tool_de_rascunho_sem_rascunho_descarta_os_do_modelo():
+    """Se `rascunhar_notificacao` não montou rascunho (sem elegíveis), o modelo não inventa um."""
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> dict:
+        return {'texto': 'O pedido não possui produtores elegíveis.'}
+
+    agente = criar_agente(
+        [
+            _modelo_chama_tools_e_responde(
+                [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-X'})],
+                {'texto': 'Sem elegíveis.', 'rascunhos': [RASCUNHO_INVENTADO]},
+            )
+        ],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-rasc-vazio',
+        'rascunhe para os elegíveis do PED-X',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.rascunhos == []
+
+
+def test_rascunho_do_modelo_sem_tool_tem_quebras_de_linha_corrigidas():
+    """Sem tool de rascunho, vale o do modelo, mas `\\n` escapado vira quebra de linha."""
+    escapado = dict(RASCUNHO_INVENTADO, conteudo='Prezados,\\n\\nConfirmamos o recebimento.')
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde([], {'texto': 'Segue o rascunho.', 'rascunhos': [escapado]})],
+        tools=[],
+    )
+    turno = processar_turno(
+        'sess-rasc-modelo',
+        'rascunhe uma resposta ao comprador',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    [rascunho] = turno.rascunhos
+    assert rascunho.conteudo == 'Prezados,\n\nConfirmamos o recebimento.'

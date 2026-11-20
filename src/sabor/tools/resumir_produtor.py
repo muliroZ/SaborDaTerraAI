@@ -21,6 +21,7 @@ from sabor.tools.base import (
     _aplicar_filtro_produtor,
     _mascarar_opcional,
     _resolver_usuario,
+    registrar_rascunhos,
 )
 from sabor.tools.consultar_dados import consultar_financeiro
 
@@ -434,6 +435,7 @@ def resumir_produtor(
         canal='padrao',
         conteudo='\n'.join(linhas_rascunho),
     )
+    registrar_rascunhos(ctx.deps, [rascunho])
 
     return ResumoProdutorResultado(
         encontrado=True,

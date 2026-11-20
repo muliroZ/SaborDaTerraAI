@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import psycopg
 
 from sabor.agent.mascarador import Mascarador
-from sabor.agent.schemas import Relatorio
+from sabor.agent.schemas import Rascunho, Relatorio
 
 DATA_REF_PADRAO = date(2026, 10, 30)
 """Retrato padrão dos dados operacionais e documentais (30/10/2026)."""
@@ -121,3 +121,8 @@ class AgentDeps:
     mascarador: Any = field(default_factory=Mascarador)
     relatorios: list[Relatorio] = field(default_factory=list)
     """Relatórios gerados pelas tools no turno (#15); o runner os anexa à resposta."""
+    rascunhos: list[Rascunho] = field(default_factory=list)
+    """Rascunhos montados pelas tools no turno (`resumir_produtor`, `rascunhar_notificacao`).
+
+    O runner os anexa à resposta no lugar dos que o modelo devolver (F3 do Bloco 4).
+    """

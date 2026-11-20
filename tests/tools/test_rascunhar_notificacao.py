@@ -136,6 +136,7 @@ def _ctx(
         data_referencia=data_referencia,
         usuario=usuario,
         mascarador=mascarador,
+        rascunhos=[],
     )
     return SimpleNamespace(deps=deps)
 
@@ -191,6 +192,7 @@ async def test_usuario_none_nao_quebra_e_atua_como_equipe():
     assert len(res.rascunhos) == 1
     assert "05/11/2026" in res.rascunhos[0].conteudo
     assert "28/10/2026" not in res.rascunhos[0].conteudo
+    assert ctx.deps.rascunhos == res.rascunhos  # o runner anexa estes, não os do modelo (F3)
 
 
 @pytest.mark.anyio

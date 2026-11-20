@@ -98,6 +98,12 @@ contratos, fichas técnicas ou atas).
    - Resumo da situação de um produtor (mesmo com pedido de rascunho de mensagem para ele) → \
 use somente `resumir_produtor` (já inclui vendas, pendências, alertas, pedidos elegíveis e o \
 rascunho).
+
+8. Rascunhos montados pelas ferramentas:
+   - Os rascunhos de `resumir_produtor` e `rascunhar_notificacao` são anexados automaticamente \
+à resposta, exatamente como a ferramenta os montou. Nesses turnos, deixe `rascunhos` vazio e não \
+reescreva as mensagens no `texto`: diga que estão prontos para revisão e aponte só o que a equipe \
+precisa conferir antes de enviar (ex.: data a confirmar com o comprador, item sem produtor).
 """
 
 

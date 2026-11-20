@@ -17,12 +17,12 @@ Legenda: ✅ atende ao esperado no PDF · ⚠️ atende ao esperado, mas com def
 |---|---|---|---|
 | REL-01 | Resumo da Maria das Graças + rascunho | ⚠️ | Usa só `resumir_produtor`. Vendas R$ 1.090 / R$ 0, pendente R$ 0, sem NC falsa e com o card de rascunho. Mas afirma "nenhum pedido elegível", o que é falso (P001 tem goiaba no PED-2026-002): achado [F1](#f1). |
 | REL-02 | "Gere um relatório da Maria das Graças" | ⚠️ | Não cai em falha segura: o filtro de `prepare_tools` esconde `gerar_relatorio` e o pedido vai para `resumir_produtor`. Mas o modelo encadeia mais 2 ou 3 tools redundantes nas 3 rodadas: achado [F4](#f4). |
-| REL-03 | Resumo do P008 e do P004 | ⚠️ | P008 aparece com certificação vencida desde 30/09/2026 e P004 vencendo em 01/12/2026 (3/3). Em 1 das 3 rodadas, os rascunhos saíram com `\n` literal no card ([F3](#f3)). A flag `inadimplencia` foi aplicada à P004, que é a credora ([F6](#f6)). |
+| REL-03 | Resumo do P008 e do P004 | ⚠️ | P008 aparece com certificação vencida desde 30/09/2026 e P004 vencendo em 01/12/2026 (3/3). Em 1 das 3 rodadas, os rascunhos saíram com `\n` literal no card ([F3](#f3), resolvido). A flag `inadimplencia` foi aplicada à P004, que é a credora ([F6](#f6)). |
 | REL-04 | Resumo do Cícero Romão (P003) | ❌ | Mostra R$ 6.020 vencidos, mas não cita a SuperBom (0/3) e diz "nenhum pedido elegível", quando existem pedidos abertos de queijo coalho, ricota e queijo manteiga: achados [F1](#f1) (resolvido) e [F5](#f5). |
 | REL-05 | Relatório de contas a receber | ✅ | Chama `gerar_relatorio('contas_a_receber')` e anexa `contas_a_receber_20261030.md`. O texto traz R$ 8.690 vencidos, R$ 4.690 a vencer e R$ 13.380 no total, sem colar o Markdown. Tabelas conferidas linha a linha. |
 | REL-06 | Levantamento de orgânicos vigentes para baixar | ✅ | Chama `gerar_relatorio('organicos_vigentes')` e anexa o `.md` com 8 produtores vigentes. P008 fica fora e aparece na seção "Atenção". |
 | REL-07 | Dossiê ADAGRO do PED-2026-014 | ✅ | Anexa `dossie_adagro_PED-2026-014_20261030.md` com o que foi pedido, o que existe e o que falta, item a item. Confere com `docs/fontes/pedidos.md` (8 vigentes, laudos só de P002/P003, 3 lotes só de queijo coalho e mel, NC-001 descumprida, NC-002 sem evidência). |
-| REL-08 | Rascunhos para os elegíveis do PED-2026-002 | ⚠️ | O bug `ctx: Any` citado no PDF **já foi corrigido** (`a698246`) e a tool roda. Mas a banana prata (40 kg) some sem aviso ([F2](#f2)), e o LLM reescreve os rascunhos da tool, inventando itens e afirmações ([F3](#f3)). |
+| REL-08 | Rascunhos para os elegíveis do PED-2026-002 | ⚠️ | O bug `ctx: Any` citado no PDF **já foi corrigido** (`a698246`) e a tool roda. Mas a banana prata (40 kg) some sem aviso ([F2](#f2)), e o LLM reescreve os rascunhos da tool, inventando itens e afirmações ([F3](#f3), resolvido). |
 
 **Placar para a apresentação:** 3 ✅ / 4 ⚠️ / 1 ❌. Pelo critério estrito do PDF, são **7/8**: só o REL-04 deixa de cumprir um item explícito. Os ⚠️ cumprem o que o PDF pede, mas têm defeitos que aparecem numa demo.
 
@@ -87,6 +87,22 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 - **Causa:** `RespostaAgente.rascunhos` vem só do `final_result` do modelo. Diferente de `relatorios` (sobrescritos com `deps.relatorios` em `_anexar_relatorios`), nada amarra os rascunhos ao que a tool devolveu.
 - **Correção sugerida:** seguir o padrão dos relatórios. As tools registram seus rascunhos em `deps`, e o runner os anexa de forma determinística, descartando ou ignorando os do modelo quando `resumir_produtor` ou `rascunhar_notificacao` rodaram no turno. Assim o guardrail 4a e a proteção de PII continuam valendo sobre o mesmo conteúdo.
 
+**Status: resolvido.**
+
+- `AgentDeps.rascunhos` recebe os rascunhos que `resumir_produtor` e `rascunhar_notificacao` montam, via `registrar_rascunhos` em `src/sabor/tools/base.py`.
+- Na Etapa 4, `_anexar_rascunhos` (`src/sabor/agent/runner.py`) substitui os rascunhos do modelo pelos das tools sempre que uma delas roda no turno, mesmo quando a tool não montou nenhum. Os rascunhos passam pelo mascarador, não têm a PII restaurada e são avaliados pelo guardrail 4a depois.
+- Repetições idênticas da mesma chamada viram um rascunho só.
+- Quando nenhuma dessas tools roda (por exemplo, numa resposta a um comprador), vale o rascunho do modelo, e o `\n` literal vira quebra de linha.
+- O prompt ganhou a diretriz 8: nesses turnos, o modelo deixa `rascunhos` vazio e só aponta o que a equipe precisa conferir.
+- **Testes:**
+  - em `tests/agent/test_runner.py`, os rascunhos da tool substituem o inventado, saem mascarados e sem duplicata; uma tool sem rascunho descarta o do modelo; o `\n` do modelo é corrigido;
+  - nas tools, `resumir_produtor` (em `tests/test_triagem.py`) e `rascunhar_notificacao` registram em `deps`.
+- **Validação com o agente:** 3 rodadas de REL-01, REL-03, REL-04 e REL-08, 12 turnos ao todo.
+  - Em todos, os rascunhos entregues são exatamente os da tool, sem `\n` literal.
+  - No REL-03, a ordem pode variar quando as duas chamadas rodam em paralelo.
+  - O texto do REL-08 deixou de inventar a divisão proporcional e só pede que a equipe confira a data e a divisão dos volumes.
+- **Efeito colateral corrigido:** com os rascunhos da tool, o guardrail 4a passou a bloquear o REL-08 (3/3) e o REL-04 (1/3). Ver [F10](#f10).
+
 ### F4
 
 **`resumir_produtor` vem seguido de tools redundantes quando o pedido diz "relatório". Severidade: média.**
@@ -142,6 +158,19 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
 
 - **Evidência:** as flags da tool vêm como "Sinalização regulatória/operacional: data_inconsistente", "…: ambiguidade" e "…: conformidade", sem dizer qual data, qual item ou qual produtor (`src/sabor/tools/rascunhar_notificacao.py:266`). O modelo acaba redigindo as flags do zero.
 - **Correção sugerida:** usar as descrições já calculadas na classificação. `entrega.alerta`, por exemplo, traz o texto completo da divergência entre 04/11 e a terça.
+
+### F10
+
+**O guardrail 4a trata como restritos todos os produtores citados num trecho de inspeção. Severidade: alta. Encontrado ao validar o [F3](#f3).**
+
+- **Evidência:** com os rascunhos determinísticos, o REL-08 foi bloqueado em 3/3 rodadas ("comercialização de item sob restrição sanitária"), e o REL-04 em 1/3 ("produtor sob restrição").
+- **Causa:** `_verificar_regra_4a_sanitaria` (`src/sabor/agent/guardrail_exit.py`) avaliava cada trecho de inspeção inteiro. O trecho "ESTABELECIMENTO INSPECIONADO" do relatório da ADAGRO traz P001, P002, P003 e P005 ("REGULAR") junto com P017 ("IRREGULAR"). A palavra "irregular" tornava restritos todos esses produtores e produtos: goiaba, queijo coalho, mel, macaxeira…
+- **Por que aparecia agora:** "quantidade a confirmar de goiaba" casa com o padrão comercial `confirmar` e ativava o bloqueio. A versão que o LLM redigitava escapava disso por acaso.
+- **Correção:** a restrição passa a ser avaliada por parágrafo, como `_chunk_tem_nc_para_produtor` já faz no resumo. No relatório, cada produtor vistoriado tem um parágrafo próprio, e só o do P017 e o da NC-001 continuam restritos.
+- **O que não mudou:**
+  - "quantidade a confirmar de frango caipira" segue bloqueado; a correção não afrouxou o padrão comercial.
+  - O termo "ovos" também segue restrito, porque aparece no parágrafo do P017 e na NC-001.
+- **Testes:** em `tests/agent/test_exit_guardrail.py`, um caso unitário com produtor regular e irregular no mesmo trecho e um caso com o banco real (P001 com goiaba e P003 com queijo passam; P017 com frango é bloqueado). Os dois falham sem a correção.
 
 ### Observações (sem ação obrigatória)
 

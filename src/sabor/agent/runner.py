@@ -60,6 +60,7 @@ from sabor.agent.mascarador import Mascarador
 from sabor.agent.prompts import SYSTEM_PROMPT_BASE, instrucoes_contexto_turno
 from sabor.agent.schemas import (
     Fonte,
+    Rascunho,
     Relatorio,
     RespostaAgente,
     RespostaTurno,
@@ -224,6 +225,57 @@ def _anexar_relatorios(
             relatorio = relatorio.model_copy(update={'markdown': mascarar_fn(relatorio.markdown)})
         por_arquivo[relatorio.nome_arquivo] = relatorio
     return resposta.model_copy(update={'relatorios': list(por_arquivo.values())})
+
+
+TOOLS_DE_RASCUNHO = frozenset({'resumir_produtor', 'rascunhar_notificacao'})
+"""Tools que montam rascunhos sem LLM e os registram em `deps.rascunhos`."""
+
+
+def _corrigir_quebras_escapadas(rascunho: Rascunho) -> Rascunho:
+    """Troca `\\n` literal por quebra de linha quando o modelo escapou o texto duas vezes."""
+    conteudo = rascunho.conteudo
+    if '\\n' in conteudo and '\n' not in conteudo:
+        return rascunho.model_copy(update={'conteudo': conteudo.replace('\\n', '\n')})
+    return rascunho
+
+
+def _anexar_rascunhos(
+    resposta: RespostaAgente,
+    deps: AgentDeps,
+    *,
+    tool_de_rascunho_chamada: bool,
+) -> RespostaAgente:
+    """Etapa 4: usa os rascunhos que as tools montaram no lugar dos que o modelo devolveu.
+
+    Quando `resumir_produtor` ou `rascunhar_notificacao` rodam no turno, os rascunhos da
+    resposta são exatamente os que elas registraram em `deps.rascunhos`. O modelo costumava
+    redigitá-los: perdia quantidades, inventava itens e às vezes escapava as quebras de linha
+    (F3 do Bloco 4). Os rascunhos do modelo são descartados mesmo quando a tool não montou
+    nenhum, para ele não preencher a lacuna por conta própria.
+
+    Sem essas tools, valem os rascunhos do modelo (ex.: resposta a um comprador), só com as
+    quebras de linha corrigidas. Como os relatórios, os rascunhos passam pelo mascarador e não
+    têm a PII restaurada; o guardrail de saída (4a) os avalia depois.
+    """
+    lista = getattr(deps, 'rascunhos', None)
+    gerados = [r for r in lista if isinstance(r, Rascunho)] if isinstance(lista, list) else []
+    if isinstance(lista, list):
+        lista.clear()
+
+    if not tool_de_rascunho_chamada:
+        return resposta.model_copy(
+            update={'rascunhos': [_corrigir_quebras_escapadas(r) for r in resposta.rascunhos]}
+        )
+
+    mascarar_fn = getattr(deps.mascarador, 'mascarar', None)
+    unicos: dict[tuple[str, str], Rascunho] = {}
+    for rascunho in gerados:
+        if callable(mascarar_fn):
+            rascunho = rascunho.model_copy(
+                update={'conteudo': mascarar_fn(rascunho.conteudo)}
+            )
+        unicos.setdefault((rascunho.destinatario, rascunho.conteudo), rascunho)
+    return resposta.model_copy(update={'rascunhos': list(unicos.values())})
 
 
 def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAgente:
@@ -604,6 +656,8 @@ def processar_turno(
             deps_exec.dataset_version = dataset_ver
         if isinstance(getattr(deps_exec, 'relatorios', None), list):
             deps_exec.relatorios.clear()  # só anexa o que for gerado neste turno (#15)
+        if isinstance(getattr(deps_exec, 'rascunhos', None), list):
+            deps_exec.rascunhos.clear()  # idem para os rascunhos das tools
         mascarar_fn = getattr(deps_exec.mascarador, 'mascarar', None)
         mensagem_para_llm = (
             mascarar_fn(mensagem_limpa) if callable(mascarar_fn) else mensagem_limpa
@@ -697,6 +751,15 @@ def processar_turno(
             deps_exec,
             gerar_relatorio_chamado=any(
                 isinstance(part, ToolCallPart) and part.tool_name == 'gerar_relatorio'
+                for msg in resultado.new_messages()
+                for part in getattr(msg, 'parts', ())
+            ),
+        )
+        resposta_final = _anexar_rascunhos(
+            resposta_final,
+            deps_exec,
+            tool_de_rascunho_chamada=any(
+                isinstance(part, ToolCallPart) and part.tool_name in TOOLS_DE_RASCUNHO
                 for msg in resultado.new_messages()
                 for part in getattr(msg, 'parts', ())
             ),

@@ -13,7 +13,7 @@ from pydantic_ai import RunContext
 
 from sabor.agent.deps import AgentDeps
 from sabor.agent.schemas import Flag, Fonte, Rascunho, RespostaAgente
-from sabor.tools.base import SemPermissao, _resolver_usuario
+from sabor.tools.base import SemPermissao, _resolver_usuario, registrar_rascunhos
 from sabor.tools.pedidos import Comprador, Entrega, Item, Pedido, extrair_e_classificar
 from sabor.tools.regras import (
     _conn_eh_real,
@@ -456,6 +456,7 @@ async def rascunhar_notificacao(
         "(sistema read-only, nenhum envio automático foi realizado).",
     )
 
+    registrar_rascunhos(ctx.deps, rascunhos)
     return RespostaAgente(
         texto=texto_final,
         flags=flags_obj,

@@ -335,6 +335,7 @@ def test_resumo_do_produtor_mostra_os_itens_triados(conn, modelo, monkeypatch):
     ]
     assert cicero.pedidos_em_aberto[0].data_entrega == date(2026, 11, 3)
     assert 'PED-T-003: queijo coalho — 30 kg (entrega em 03/11)' in cicero.rascunho.conteudo
+    assert deps.rascunhos == [cicero.rascunho]  # registrado para o runner anexar (F3)
     # Origem animal sem SIE: o pedido não é oferecido ao produtor.
     assert resumir_produtor(ctx, 'P011').pedidos_em_aberto == []
 

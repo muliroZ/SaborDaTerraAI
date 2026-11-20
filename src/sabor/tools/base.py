@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 
 import psycopg
 from pydantic import BaseModel
-from sabor.agent.schemas import Fonte
+from sabor.agent.schemas import Fonte, Rascunho
 
 DATA_REFERENCIA_PADRAO = date(2026, 10, 30)
 TABELA_PRECOS_REFERENCIA_PADRAO = date(2026, 10, 1)
@@ -127,3 +127,19 @@ def _resolver_produto_id(conn: psycopg.Connection, nome_ou_sinonimo: str) -> int
         'SELECT produto_id FROM produto_sinonimos WHERE lower(sinonimo) = %s', (chave,)
     ).fetchone()
     return linha[0] if linha else None
+
+
+# ---------------------------------------------------------------------------
+# Rascunhos determinísticos (F3 do Bloco 4)
+# ---------------------------------------------------------------------------
+
+
+def registrar_rascunhos(deps: object, rascunhos: list[Rascunho]) -> None:
+    """Guarda em `deps.rascunhos` os rascunhos montados pela tool.
+
+    O runner anexa esses rascunhos à resposta exatamente como a tool os montou, em vez de
+    confiar na cópia que o modelo devolve em `final_result`.
+    """
+    lista = getattr(deps, 'rascunhos', None)
+    if isinstance(lista, list):
+        lista.extend(rascunhos)
