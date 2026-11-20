@@ -41,6 +41,11 @@ _MARCADORES_RESTRICAO_INSPECAO = (
     'nc-', 'nao conform', 'sem registro sie',
 )
 
+_PADRAO_SEPARADOR_BLOCO_INSPECAO = re.compile(
+    r'\n\s*\n+|(?=\n[ \t]*(?:\d+\.\s+p\d{3}\b|nc-\d+\b))',
+    re.IGNORECASE,
+)
+
 _REGEX_NEGACAO_COMERCIAL = re.compile(
     r'\b(?:nao|nunca|jamais)\s+'
     r'(?:podemos|pode|podem|vamos|iremos|ha|tem|esta|estao|e|sao|sera|serao|vai|vao|foi|foram)?\s*'
@@ -101,6 +106,35 @@ def _termos_produto_restrito(nome_produto: str) -> tuple[str, ...]:
     return (norm,)
 
 
+def _extrair_blocos_restritivos(texto_insp: str) -> list[tuple[str, str]]:
+    """Isola apenas blocos com restrição sanitária dentro de um chunk de inspeção.
+
+    Retorna pares `(bloco_restritivo_sem_lista_produtos, bloco_sem_nota)` para evitar que
+    produtores ou itens regulares no mesmo chunk (como P001..P005 ou ovos em `inspecao_adagro`)
+    herdem a interdição de outro produtor/item.
+    """
+    if not texto_insp:
+        return []
+    texto_unificado = texto_insp.replace('\r\n', '\n').replace('\r', '\n')
+    blocos_brutos = _PADRAO_SEPARADOR_BLOCO_INSPECAO.split(texto_unificado)
+    restritivos: list[tuple[str, str]] = []
+    for bloco in blocos_brutos:
+        linhas_norm = [_norm(linha).strip() for linha in bloco.splitlines() if linha.strip()]
+        if not linhas_norm:
+            continue
+        bloco_norm = '\n'.join(linhas_norm)
+        if not any(m in bloco_norm for m in _MARCADORES_RESTRICAO_INSPECAO):
+            continue
+        linhas_sem_nota = [ln for ln in linhas_norm if not ln.startswith('nota:')]
+        if not linhas_sem_nota:
+            continue
+        linhas_sem_produtos = [ln for ln in linhas_sem_nota if not ln.startswith('produtos:')]
+        bloco_sem_nota = '\n'.join(linhas_sem_nota)
+        bloco_principal = '\n'.join(linhas_sem_produtos) if linhas_sem_produtos else bloco_sem_nota
+        restritivos.append((bloco_principal, bloco_sem_nota))
+    return restritivos
+
+
 def _verificar_regra_4a_sanitaria(
     conn: Any,
     resposta: RespostaAgente,
@@ -157,30 +191,40 @@ def _verificar_regra_4a_sanitaria(
         """,
     ).fetchall()
 
-    chunks_restritivos: list[tuple[str, str | None]] = []
+    blocos_restritivos: list[tuple[str, str, str | None]] = []
     for texto_insp, prod_id_insp in rows_inspecao:
-        t_insp_norm = _norm(texto_insp or '')
-        if any(w in t_insp_norm for w in _MARCADORES_RESTRICAO_INSPECAO):
-            pid_insp = _norm(str(prod_id_insp)) if prod_id_insp else None
-            chunks_restritivos.append((t_insp_norm, pid_insp))
+        pid_insp = _norm(str(prod_id_insp)) if prod_id_insp else None
+        for bloco_principal, bloco_sem_nota in _extrair_blocos_restritivos(texto_insp or ''):
+            blocos_restritivos.append((bloco_principal, bloco_sem_nota, pid_insp))
 
-    if not chunks_restritivos:
+    if not blocos_restritivos:
         return False, None
 
-    # Identifica dinamicamente produtos do catálogo e produtores nos chunks restritivos
+    # Identifica dinamicamente produtos do catálogo e produtores apenas nos blocos restritivos
     rows_produtos = conn.execute('SELECT nome FROM produtos').fetchall()
+    catalogo_termos = [
+        _termos_produto_restrito(str(nome_prod))
+        for (nome_prod,) in rows_produtos
+    ]
     termos_restritos: set[str] = set()
-    for (nome_prod,) in rows_produtos:
-        termos_prod = _termos_produto_restrito(str(nome_prod))
-        if any(
-            any(re.search(rf'\b{re.escape(t)}\b', chunk) for t in termos_prod)
-            for chunk, _ in chunks_restritivos
-        ):
-            termos_restritos.update(termos_prod)
+    for bloco_principal, bloco_sem_nota, _ in blocos_restritivos:
+        encontrou_no_principal = False
+        for termos_prod in catalogo_termos:
+            if termos_prod and any(
+                re.search(rf'\b{re.escape(t)}\b', bloco_principal) for t in termos_prod
+            ):
+                termos_restritos.update(termos_prod)
+                encontrou_no_principal = True
+        if not encontrou_no_principal and bloco_sem_nota != bloco_principal:
+            for termos_prod in catalogo_termos:
+                if termos_prod and any(
+                    re.search(rf'\b{re.escape(t)}\b', bloco_sem_nota) for t in termos_prod
+                ):
+                    termos_restritos.update(termos_prod)
 
-    produtores_restritos: set[str] = {pid for _, pid in chunks_restritivos if pid}
-    for chunk, _ in chunks_restritivos:
-        produtores_restritos.update(re.findall(r'\bp\d{3}\b', chunk))
+    produtores_restritos: set[str] = {pid for _, _, pid in blocos_restritivos if pid}
+    for bloco_principal, _, _ in blocos_restritivos:
+        produtores_restritos.update(re.findall(r'\bp\d{3}\b', bloco_principal))
 
     for seg in segmentos_comerciais:
         if any(re.search(rf'\b{re.escape(pid)}\b', seg) for pid in produtores_restritos):

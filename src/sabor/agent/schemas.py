@@ -97,6 +97,7 @@ EarlyReturnList = Literal[
     "CACHE_HIT",
     "COTA_SESSAO_ESGOTADA",
     "ORCAMENTO_TURNO_ESGOTADO",
+    "SEM_PERMISSAO",
 ]
 
 class RetornoAntecipado(BaseModel):

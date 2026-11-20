@@ -67,7 +67,7 @@ from sabor.agent.schemas import (
 )
 from sabor.db import conectar_readonly
 from sabor.observabilidade import instrumentar_turno
-from sabor.tools.base import _resolver_usuario
+from sabor.tools.base import SemPermissao, _resolver_usuario
 
 logger = logging.getLogger(__name__)
 
@@ -225,10 +225,22 @@ def _anexar_relatorios(
     return resposta.model_copy(update={'relatorios': list(por_arquivo.values())})
 
 
+def _desescapar_quebras_linha(texto: str) -> str:
+    """Converte sequências literais `\\n` / `\\r\\n` devolvidas por LLMs em quebras reais."""
+    if '\\n' not in texto:
+        return texto
+    return texto.replace('\\r\\n', '\n').replace('\\n', '\n')
+
+
 def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAgente:
-    """Move citações `[arquivo · ref]` do texto para `fontes` e limpa blocos `Fontes:`."""
+    """Move citações `[arquivo · ref]` do texto para `fontes`, limpa `Fontes:` e
+    desescapa `\\n` literais em `texto` e `rascunhos`."""
+    rascunhos_norm = [
+        r.model_copy(update={'conteudo': _desescapar_quebras_linha(r.conteudo)})
+        for r in resposta.rascunhos
+    ]
     if not resposta.texto:
-        return resposta
+        return resposta.model_copy(update={'rascunhos': rascunhos_norm})
 
     fontes_atuais = list(resposta.fontes)
     vistas = {(f.arquivo.strip(), f.referencia.strip()) for f in fontes_atuais}
@@ -238,8 +250,10 @@ def _normalizar_fontes_e_texto_resposta(resposta: RespostaAgente) -> RespostaAge
             vistas.add(chave)
             fontes_atuais.append(Fonte(arquivo=chave[0], referencia=chave[1]))
 
-    texto_limpo = limpar_citacoes_inline_texto(resposta.texto)
-    return resposta.model_copy(update={'texto': texto_limpo, 'fontes': fontes_atuais})
+    texto_limpo = limpar_citacoes_inline_texto(_desescapar_quebras_linha(resposta.texto))
+    return resposta.model_copy(
+        update={'texto': texto_limpo, 'fontes': fontes_atuais, 'rascunhos': rascunhos_norm}
+    )
 
 
 def _restaurar_pii_resposta(resposta: RespostaAgente, mascarador: Any) -> RespostaAgente:
@@ -403,13 +417,26 @@ def _coletar_fontes_valor(
                 else ''
             )
             destino.append(f'{arquivo.strip()}{ref}')
+        pedido_id = valor.get('pedido_id')
+        if isinstance(pedido_id, str) and pedido_id.strip():
+            destino.append(f'pedidos.json {pedido_id.strip()}')
+        produtores_elegiveis = valor.get('produtores_elegiveis')
+        if isinstance(produtores_elegiveis, (list, tuple)):
+            for pid in produtores_elegiveis:
+                if isinstance(pid, str) and pid.strip():
+                    destino.append(f'produtores.csv {pid.strip()}')
         for chave in ('fontes', 'fonte'):
             if chave in valor:
                 _coletar_fontes_valor(valor[chave], destino, aceitar_str=True)
         for k, v in valor.items():
-            if k not in ('arquivo', 'referencia', 'fontes', 'fonte') and isinstance(
-                v, (dict, list, tuple)
-            ):
+            if k not in (
+                'arquivo',
+                'referencia',
+                'fontes',
+                'fonte',
+                'pedido_id',
+                'produtores_elegiveis',
+            ) and isinstance(v, (dict, list, tuple)):
                 _coletar_fontes_valor(v, destino, aceitar_str=False)
     elif isinstance(valor, (list, tuple)):
         for item in valor:
@@ -644,6 +671,32 @@ def processar_turno(
         )
         persistir_e_auditar(turno_orcamento)
         return turno_orcamento
+    except SemPermissao as exc:
+        latencia_ms = int((time.perf_counter() - inicio) * 1000)
+        mensagem_permissao = (
+            str(exc).strip()
+            or 'Você não tem permissão para executar esta operação com o perfil atual.'
+        )
+        logger.info(
+            'Acesso restrito desfecho=sem_permissao sessao=%s usuario=%s latencia_ms=%s',
+            sessao_id,
+            usuario,
+            latencia_ms,
+        )
+        retorno_permissao = RetornoAntecipado(
+            motivo='SEM_PERMISSAO',
+            mensagem=mensagem_permissao,
+        )
+        turno_permissao = RespostaTurno(
+            sessao_id=sessao_id,
+            usuario=usuario,
+            texto=retorno_permissao.mensagem,
+            bloqueado_guardrail=True,
+            retorno_antecipado=retorno_permissao,
+            latencia_ms=latencia_ms,
+        )
+        persistir_e_auditar(turno_permissao)
+        return turno_permissao
     except (
         TimeoutError,
         httpx.TimeoutException,

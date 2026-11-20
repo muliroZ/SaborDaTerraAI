@@ -93,6 +93,7 @@ ROTULOS_RETORNO: dict[str, Destaque] = {
     'ORCAMENTO_TURNO_ESGOTADO': Destaque(
         'warning', 'Limite do turno atingido', ':material/hourglass_disabled:'
     ),
+    'SEM_PERMISSAO': Destaque('warning', 'Acesso restrito', ':material/lock:'),
 }
 
 DESTAQUE_FALHA_SEGURA = Destaque('error', 'Falha segura', ':material/cloud_off:')

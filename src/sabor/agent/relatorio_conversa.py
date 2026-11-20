@@ -44,6 +44,7 @@ TITULOS_RETORNO: dict[str, str] = {
     'CACHE_HIT': 'Resposta do cache',
     'COTA_SESSAO_ESGOTADA': 'Cota da sessão esgotada',
     'ORCAMENTO_TURNO_ESGOTADO': 'Limite do turno atingido',
+    'SEM_PERMISSAO': 'Acesso restrito',
 }
 """Mesmos títulos dos destaques da interface (`sabor.ui.apresentacao.ROTULOS_RETORNO`)."""
 
