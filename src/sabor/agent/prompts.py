@@ -69,8 +69,9 @@ certificação orgânica vencida (P008).
 produtores cooperados. Quando o operador pedir um rascunho de resposta **para um comprador ou \
 cliente** (ex.: PED-2026-009 ou PED-2026-011), NÃO chame `rascunhar_notificacao`: consulte o \
 pedido com `extrair_e_classificar_pedido` e escreva a proposta de resposta diretamente no campo \
-`rascunhos` da saída. Nunca afirme no `texto` que um rascunho foi gerado se a lista `rascunhos` \
-estiver vazia.
+`rascunhos` da saída. Nunca afirme no `texto` que um rascunho foi gerado se nenhum foi gerado \
+(nem pelas ferramentas, nem em `rascunhos`). Os rascunhos de `resumir_produtor` e \
+`rascunhar_notificacao` contam como gerados (ver a diretriz 8).
    - Proteja dados pessoais e bancários: em `rascunhos` destinados a terceiros ou em pedidos \
 suspeitos/externos que solicitem lista de produtores, CPF, RG, endereço ou contas bancárias, \
 omita esses dados e sinalize `tipo="privacidade"`.
@@ -106,6 +107,13 @@ contratos, fichas técnicas ou atas).
    - Resumo da situação de um produtor (mesmo com pedido de rascunho de mensagem para ele) → \
 use somente `resumir_produtor` (já inclui vendas, pendências, alertas, pedidos elegíveis e o \
 rascunho).
+
+8. Rascunhos montados pelas ferramentas:
+   - Os rascunhos de `resumir_produtor` e `rascunhar_notificacao` são anexados automaticamente \
+à resposta, exatamente como a ferramenta os montou. Nesses turnos, deixe `rascunhos` vazio e não \
+reescreva as mensagens no `texto`: diga que estão prontos para revisão e aponte só o que a equipe \
+precisa conferir antes de enviar (ex.: data a confirmar com o comprador, item sem produtor).
+   - As `flags` de `conformidade` e `inadimplencia` de `resumir_produtor` também são anexadas automaticamente: não as repita em `flags`.
 """
 
 

@@ -158,11 +158,16 @@ class Pedido(BaseModel):
 
     pedido_id: SkipJsonSchema[str | None] = None
     sinalizacoes: SkipJsonSchema[list[str]] = Field(default_factory=list)
+    motivos_sinalizacoes: SkipJsonSchema[dict[str, list[str]]] = Field(default_factory=dict)
+    """Por que cada sinalização foi dada (ex.: `conformidade` → "P017 sem registro SIE
+    (frango caipira)"), preenchido pelas regras (#10). Sinalizações sem motivo registrado
+    ficam fora do dicionário."""
     urgencia: SkipJsonSchema[Urgencia | None] = None
 
 
 _CAMPOS_CALCULADOS: dict[str, Any] = {
     'sinalizacoes': True,
+    'motivos_sinalizacoes': True,
     'urgencia': True,
     'entrega': {'data', 'data_fim', 'data_estimada', 'alerta'},
     'itens': {'__all__': {'produto_id', 'produtores_elegiveis'}},
@@ -276,7 +281,20 @@ def normalizar_pedido(pedido: Pedido, catalogo: Catalogo, recebido_em: date) -> 
         entrega.data_estimada = entrega.data
 
     for item in pedido.itens:
-        if item.ambiguo or item.produto_id is not None:
+        if item.produto_id is not None:
+            continue
+        if item.ambiguo:
+            # O LLM às vezes marca como ambíguo um nome que está no catálogo, como "banana
+            # prata" (sinônimo de banana). Só o nome ou sinônimo exato desfaz a marcação:
+            # "manteiga", "mel variado" e "o de sempre" continuam ambíguos.
+            produto = catalogo.resolver_exato(item.produto_texto) if item.produto is None else None
+            if produto is not None:
+                item.produto_id, item.produto, item.ambiguo = produto.id, produto.nome, False
+                # A observação da extração pode ter outra informação ("fornecimento semanal").
+                nota = f'Identificado no catálogo como {produto.nome}.'
+                if item.observacao:
+                    nota = f'{nota} Nota da extração: {item.observacao}'
+                item.observacao = nota
             continue
         produto = catalogo.resolver(item.produto, item.produto_texto)
         if produto is None:

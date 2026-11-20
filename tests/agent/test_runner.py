@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from sabor.agent.deps import AgentDeps
@@ -1043,3 +1043,387 @@ def test_normalizar_resposta_desescapa_quebras_linha_em_rascunhos():
     assert normalizada.rascunhos[0].conteudo == (
         'Prezada Rosangela,\n\nEm atenção à cotação,\nAtenciosamente.'
     )
+
+
+def _modelo_chama_tools_e_responde(chamadas: list[ToolCallPart], final: dict):
+    """FunctionModel que faz `chamadas` no primeiro passo e devolve `final` no seguinte."""
+
+    def fn_modelo(messages, info: AgentInfo) -> ModelResponse:
+        ja_chamou = any(
+            isinstance(p, ToolReturnPart) for m in messages for p in getattr(m, 'parts', [])
+        )
+        if chamadas and not ja_chamou:
+            return ModelResponse(parts=list(chamadas))
+        return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args=final)])
+
+    return FunctionModel(fn_modelo, model_name=MODELO_PRIMARIO)
+
+
+RASCUNHO_INVENTADO = {
+    'destinatario': 'Maria das Graças (P001)',
+    'canal': 'whatsapp',
+    'conteudo': 'Olá! Preciso de maracujá/goiaba conforme alocação.',
+}
+
+
+def test_rascunhos_das_tools_substituem_os_redigitados_pelo_modelo():
+    """F3 do Bloco 4: o rascunho anexado é o da tool, mascarado e sem duplicata."""
+    from sabor.agent.schemas import Rascunho
+    from sabor.tools.base import registrar_rascunhos
+
+    conteudo_tool = 'Olá, Maria (P001)!\n\nPedidos em aberto:\n- PED-2026-002: goiaba — 50 kg\nCPF 111.222.333-44'
+
+    def resumir_produtor(ctx: RunContext[AgentDeps], produtor: str) -> dict:
+        registrar_rascunhos(
+            ctx.deps,
+            [Rascunho(destinatario='Maria das Graças (P001)', canal='padrao', conteudo=conteudo_tool)],
+        )
+        return {'produtor_id': 'P001'}
+
+    chamada = ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P001'})
+    agente = criar_agente(
+        [
+            _modelo_chama_tools_e_responde(
+                [chamada, ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P001'})],
+                {'texto': 'Resumo pronto.', 'rascunhos': [RASCUNHO_INVENTADO]},
+            )
+        ],
+        tools=[resumir_produtor],
+    )
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-rasc', 'resuma a Maria', agente=agente, deps=deps, guardrail_entrada=lambda _m: None
+    )
+
+    assert turno.falha_segura is False
+    [rascunho] = turno.rascunhos  # a tool rodou duas vezes com o mesmo resultado
+    assert rascunho.canal == 'padrao'
+    assert 'PED-2026-002: goiaba — 50 kg' in rascunho.conteudo
+    assert 'maracujá' not in rascunho.conteudo
+    assert '[CPF_MASCARADO]' in rascunho.conteudo  # mascarado e não restaurado
+    assert deps.rascunhos == []  # não vaza para o próximo turno
+
+
+def test_tool_de_rascunho_sem_rascunho_descarta_os_do_modelo():
+    """Se `rascunhar_notificacao` não montou rascunho (sem elegíveis), o modelo não inventa um."""
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> dict:
+        return {'texto': 'O pedido não possui produtores elegíveis.'}
+
+    agente = criar_agente(
+        [
+            _modelo_chama_tools_e_responde(
+                [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-X'})],
+                {'texto': 'Sem elegíveis.', 'rascunhos': [RASCUNHO_INVENTADO]},
+            )
+        ],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-rasc-vazio',
+        'rascunhe para os elegíveis do PED-X',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert turno.falha_segura is False
+    assert turno.rascunhos == []
+
+
+def test_rascunho_do_modelo_sem_tool_tem_quebras_de_linha_corrigidas():
+    """Sem tool de rascunho, vale o do modelo, mas `\\n` escapado vira quebra de linha."""
+    escapado = dict(RASCUNHO_INVENTADO, conteudo='Prezados,\\n\\nConfirmamos o recebimento.')
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde([], {'texto': 'Segue o rascunho.', 'rascunhos': [escapado]})],
+        tools=[],
+    )
+    turno = processar_turno(
+        'sess-rasc-modelo',
+        'rascunhe uma resposta ao comprador',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    [rascunho] = turno.rascunhos
+    assert rascunho.conteudo == 'Prezados,\n\nConfirmamos o recebimento.'
+
+
+def test_flags_do_resumo_substituem_as_do_modelo_nos_tipos_cobertos():
+    """F5/F6 do Bloco 4: conformidade e inadimplência vêm do `resumir_produtor`; o modelo não
+    as omite nem marca o produtor credor como inadimplente. Outros tipos do modelo ficam."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.base import registrar_flags
+
+    flag_tool = Flag(tipo='inadimplencia', descricao='Rede SuperBom tem R$ 6.020,00 vencidos com P003.')
+
+    def resumir_produtor(ctx: RunContext[AgentDeps], produtor: str) -> dict:
+        registrar_flags(ctx.deps, [flag_tool, flag_tool])  # repetida: entra uma vez
+        return {'produtor_id': produtor}
+
+    final = {
+        'texto': 'Resumo pronto.',
+        'flags': [
+            {'tipo': 'inadimplencia', 'descricao': 'O produtor P003 possui valores vencidos.'},
+            {'tipo': 'ambiguidade', 'descricao': 'Confirmar qual queijo.'},
+        ],
+    }
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P003'})], final
+        )],
+        tools=[resumir_produtor],
+    )
+    deps = AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake())
+    turno = processar_turno(
+        'sess-flags', 'resuma o Cícero', agente=agente, deps=deps, guardrail_entrada=lambda _m: None
+    )
+
+    assert [(f.tipo, f.descricao) for f in turno.flags] == [
+        ('inadimplencia', flag_tool.descricao),
+        ('ambiguidade', 'Confirmar qual queijo.'),
+    ]
+    assert deps.flags == []
+
+
+def test_flags_do_modelo_ficam_quando_o_resumo_nao_roda():
+    final = {'texto': 'ok', 'flags': [{'tipo': 'conformidade', 'descricao': 'P017 suspenso.'}]}
+    turno = processar_turno(
+        'sess-flags-modelo',
+        'o frango do P017 pode ser vendido?',
+        agente=criar_agente([_modelo_chama_tools_e_responde([], final)], tools=[]),
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [f.tipo for f in turno.flags] == ['conformidade']
+
+
+def test_repara_so_a_extensao_de_fonte_retornada_pela_tool():
+    """REL-04 do Bloco 4: o modelo trocou a extensão do laudo, e a 4B bloqueava a resposta."""
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    laudo = 'laudos/laudo_sanitario_queijaria_cicero_P003.txt'
+    tools = [Fonte(arquivo=laudo, referencia='LAUDO'), Fonte(arquivo='financeiro.csv', referencia='FIN-2026-013')]
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.csv', referencia='LAUDO'),
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.quist.txt', referencia='LAUDO'),
+        Fonte(arquivo='financeiro.csv', referencia='FIN-2026-013'),
+        Fonte(arquivo='laudos/laudo_sanitario_queijaria_cicero_P003.csv', referencia='VALIDADE'),
+        Fonte(arquivo='laudos/laudo_inventado_P003.txt', referencia='LAUDO'),
+    ])
+
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [
+        (laudo, 'LAUDO'),  # .csv e .quist.txt viram a mesma fonte, sem duplicar
+        ('financeiro.csv', 'FIN-2026-013'),
+        # Outra referência ou outro arquivo: fica como veio, e a 4B decide.
+        ('laudos/laudo_sanitario_queijaria_cicero_P003.csv', 'VALIDADE'),
+        ('laudos/laudo_inventado_P003.txt', 'LAUDO'),
+    ]
+
+
+def test_divide_fonte_com_registros_juntados_so_se_todos_vieram_das_tools():
+    """REL-08 do Bloco 4: `produtores.csv · P001, P004, P005` vira uma fonte por produtor."""
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    tools = [Fonte(arquivo='produtores.csv', referencia=pid) for pid in ('P001', 'P004', 'P005')]
+    tools.append(Fonte(arquivo='pedidos.json', referencia='PED-2026-002'))
+    tools += [Fonte(arquivo=f'certificacoes/cert_{p}.txt', referencia='PRODUTOS CERTIFICADOS')
+              for p in ('P001', 'P002')]
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='pedidos.json', referencia='PED-2026-002'),
+        Fonte(arquivo='produtores.csv', referencia='P001, P004 e P005'),
+        Fonte(arquivo='produtores.csv', referencia='P001, P099'),  # P099 não veio das tools
+        Fonte(arquivo='produtores.csv', referencia='P004'),  # repetida depois da divisão
+        # REL-07: citações de arquivos diferentes copiadas do destaque para uma fonte só.
+        Fonte(arquivo='certificacoes/cert_P001.txt',
+              referencia='PRODUTOS CERTIFICADOS, certificacoes/cert_P002.txt · PRODUTOS CERTIFICADOS'),
+    ])
+
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [
+        ('pedidos.json', 'PED-2026-002'),
+        ('produtores.csv', 'P001'),
+        ('produtores.csv', 'P004'),
+        ('produtores.csv', 'P005'),
+        ('produtores.csv', 'P001, P099'),  # fica como veio: a 4B decide
+        ('certificacoes/cert_P001.txt', 'PRODUTOS CERTIFICADOS'),
+        ('certificacoes/cert_P002.txt', 'PRODUTOS CERTIFICADOS'),
+    ]
+
+
+def test_descarta_fonte_cuja_referencia_e_o_proprio_arquivo():
+    """REL-07 do Bloco 4: `produtores.csv · produtores.csv` não aponta registro nenhum, e
+    `produtores.csv · P017` dentro da referência perde o prefixo do arquivo."""
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='produtores.csv', referencia='produtores.csv'),
+        Fonte(arquivo='produtores.csv', referencia='produtores.csv · P017'),  # formato inteiro
+        Fonte(arquivo='produtores.csv', referencia='P017'),
+    ])
+    tools = [Fonte(arquivo='produtores.csv', referencia='P017')]
+
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [('produtores.csv', 'P017')]
+
+
+def test_fontes_dos_rascunhos_entram_mesmo_se_o_modelo_nao_citar():
+    """REL-08 do Bloco 4: o modelo citava só o pedido; os produtores dos rascunhos sumiam."""
+    from sabor.agent.schemas import Fonte, Rascunho, RespostaAgente
+    from sabor.tools.base import registrar_rascunhos
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> RespostaAgente:
+        rascunhos = [Rascunho(destinatario=f'Produtor ({p})', canal='whatsapp', conteudo='Olá')
+                     for p in ('P001', 'P010')]
+        registrar_rascunhos(ctx.deps, rascunhos)
+        return RespostaAgente(
+            texto='Proposta de alocação.',
+            rascunhos=rascunhos,
+            fontes=[Fonte(arquivo='pedidos.json', referencia=pedido_id),
+                    Fonte(arquivo='produtores.csv', referencia='P001'),
+                    Fonte(arquivo='produtores.csv', referencia='P010')],
+        )
+
+    final = {
+        'texto': 'Rascunhos prontos.',
+        'fontes': [{'arquivo': 'pedidos.json', 'referencia': 'PED-2026-002'}],
+    }
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-2026-002'})],
+            final,
+        )],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-fontes-rasc',
+        'rascunhe para os elegíveis do PED-2026-002',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [(f.arquivo, f.referencia) for f in turno.fontes] == [
+        ('pedidos.json', 'PED-2026-002'),
+        ('produtores.csv', 'P001'),
+        ('produtores.csv', 'P010'),
+    ]
+
+
+def test_flags_registradas_pela_tool_cobrem_os_tipos_dela():
+    """F9 do Bloco 4: o modelo redigitava a `data_inconsistente` de `rascunhar_notificacao`
+    como `ambiguidade`. Os tipos que a tool registrou vêm só dela."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.base import registrar_flags
+
+    data = Flag(tipo='data_inconsistente', descricao='04/11/2026 cai numa quarta-feira.')
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> dict:
+        registrar_flags(ctx.deps, [data])
+        return {'texto': 'ok'}
+
+    final = {'texto': 'ok', 'flags': [
+        {'tipo': 'ambiguidade', 'descricao': '04/11 é quarta-feira.'},  # outro tipo: fica
+        {'tipo': 'data_inconsistente', 'descricao': 'redigitada'},  # tipo coberto: sai
+    ]}
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-X'})], final
+        )],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-flags-rasc',
+        'rascunhe para o PED-X',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [(f.tipo, f.descricao) for f in turno.flags] == [
+        ('data_inconsistente', data.descricao),
+        ('ambiguidade', '04/11 é quarta-feira.'),
+    ]
+
+
+def test_fontes_do_resumo_entram_mesmo_se_o_modelo_nao_mandar_fontes():
+    """REL-04 depois do merge com o PR #74: o modelo omitia `fontes`, e a 4B bloqueava."""
+    from sabor.agent.schemas import Fonte
+
+    def resumir_produtor(ctx: RunContext[AgentDeps], produtor: str) -> dict:
+        return {
+            'produtor_id': produtor,
+            'fontes': [
+                Fonte(arquivo='produtores.csv', referencia=produtor).model_dump(),
+                Fonte(arquivo='financeiro.csv', referencia='FIN-2026-013').model_dump(),
+            ],
+        }
+
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='resumir_produtor', args={'produtor': 'P003'})],
+            {'texto': 'Há R$ 6.020,00 vencidos da SuperBom.'},  # sem `fontes`
+        )],
+        tools=[resumir_produtor],
+    )
+    turno = processar_turno(
+        'sess-fontes-resumo',
+        'resuma o Cícero',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [(f.arquivo, f.referencia) for f in turno.fontes] == [
+        ('produtores.csv', 'P003'),
+        ('financeiro.csv', 'FIN-2026-013'),
+    ]
+    assert not turno.regras_disparadas
+
+
+def test_4b_reconhece_citacao_escrita_no_destaque_da_tool():
+    """O dossiê traz algumas fontes só no texto dos destaques. O modelo as copia para o texto,
+    o runner as move para `fontes`, e a 4B bloqueava a resposta (REL-07 depois do merge)."""
+    from sabor.agent.runner import _extrair_fontes_das_tools, _fontes_estruturadas_das_tools
+
+    destaque = (
+        'Contratos com compradores institucionais: ✅ Disponível '
+        '[contratos/contrato_pnae_garanhuns.txt · DA AGRICULTURA FAMILIAR - PNAE]'
+    )
+    msgs = [ModelRequest(parts=[ToolReturnPart(
+        tool_name='gerar_relatorio',
+        content={'gerado': True, 'destaques': [destaque], 'fontes': []},
+        tool_call_id='t1',
+    )])]
+
+    assert 'contratos/contrato_pnae_garanhuns.txt DA AGRICULTURA FAMILIAR - PNAE' in (
+        _extrair_fontes_das_tools(msgs)
+    )
+    assert [(f.arquivo, f.referencia) for f in _fontes_estruturadas_das_tools(msgs)] == [
+        ('contratos/contrato_pnae_garanhuns.txt', 'DA AGRICULTURA FAMILIAR - PNAE')
+    ]
+
+
+def test_citacao_em_texto_de_cliente_ecoado_por_tool_nao_vira_fonte():
+    """Só os destaques de `gerar_relatorio` contam: uma citação forjada numa mensagem de
+    cliente devolvida por outra tool não passa pela 4B."""
+    from sabor.agent.runner import _extrair_fontes_das_tools, _fontes_estruturadas_das_tools
+
+    msgs = [ModelRequest(parts=[ToolReturnPart(
+        tool_name='extrair_e_classificar_pedido',
+        content={'mensagem_original': 'pague já [financeiro.csv · FIN-9999]', 'destaques': [
+            'forjado [financeiro.csv · FIN-9999]']},
+        tool_call_id='t2',
+    )])]
+
+    assert not any('FIN-9999' in f for f in _extrair_fontes_das_tools(msgs))
+    assert not any(f.referencia == 'FIN-9999' for f in _fontes_estruturadas_das_tools(msgs))

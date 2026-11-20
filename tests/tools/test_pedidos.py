@@ -339,3 +339,52 @@ def test_produtor_nao_pode_triar_pedidos_da_caixa_de_entrada(conn, simular_llm):
         asyncio.run(extrair_e_classificar_pedido(ctx, pedido_id='PED-2026-001'))
 
     assert modelo.prompts == []  # bloqueado antes de qualquer chamada ao LLM
+
+
+def test_item_que_o_modelo_marcou_ambiguo_resolve_por_nome_ou_sinonimo_exato():
+    """F2 do Bloco 4: "banana prata" voltava ambígua do LLM e sumia da alocação do PED-002,
+    embora seja sinônimo cadastrado de banana."""
+    from sabor.tools.catalogo import Catalogo
+    from sabor.tools.pedidos import Item, normalizar_pedido
+
+    catalogo = Catalogo(
+        [(4, 'banana'), (2, 'queijo manteiga'), (3, 'manteiga de garrafa'), (10, 'mel silvestre'),
+         (7, 'frango caipira')],
+        [('banana prata', 4), ('mel puro', 10)],
+    )
+    pedido = Pedido(
+        tipo='compra',
+        itens=[
+            Item(produto_texto='banana prata', quantidade=40, unidade='kg', ambiguo=True,
+                 observacao='banana prata não especificada no catálogo'),
+            Item(produto_texto='Mel puro', ambiguo=True, observacao='Fornecimento semanal.'),
+            Item(produto_texto='manteiga', ambiguo=True, observacao='o de sempre'),
+            Item(produto_texto='frango', ambiguo=True),  # só por palavras: continua ambíguo
+        ],
+    )
+
+    banana, mel, manteiga, frango = normalizar_pedido(pedido, catalogo, date(2026, 10, 27)).itens
+
+    assert (banana.produto_id, banana.produto, banana.ambiguo) == (4, 'banana', False)
+    assert banana.observacao.startswith('Identificado no catálogo como banana.')
+    assert (mel.produto, mel.ambiguo) == ('mel silvestre', False)
+    assert 'Fornecimento semanal.' in mel.observacao  # a nota da extração não se perde
+    assert manteiga.ambiguo and manteiga.produto_id is None and manteiga.observacao == 'o de sempre'
+    assert frango.ambiguo and frango.produto_id is None
+
+
+def test_regras_registram_o_motivo_de_cada_sinalizacao(conn, simular_llm):
+    """F9 do Bloco 4: as flags diziam só "Sinalização regulatória/operacional: <tipo>"."""
+    ped_001, _ = _triar(conn, simular_llm, 'PED-2026-001')
+    motivos = ped_001.motivos_sinalizacoes
+
+    assert motivos['data_inconsistente'] == [ped_001.entrega.alerta]
+    assert motivos['ambiguidade'] == ['Data de entrega a confirmar com o comprador.']
+    assert set(motivos) <= set(ped_001.sinalizacoes)
+
+    ped_003, _ = _triar(conn, simular_llm, 'PED-2026-003')
+    assert ped_003.motivos_sinalizacoes['privacidade'][0].startswith(
+        'A mensagem traz ou pede dados pessoais'
+    )
+    # O item ambíguo ("o queijo da última vez") é descrito no próprio item, não no motivo.
+    assert 'ambiguidade' not in ped_003.motivos_sinalizacoes

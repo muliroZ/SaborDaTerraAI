@@ -732,10 +732,14 @@ def _secao_cadastro(
     secao = _Secao(titulo)
     ativos = sum(1 for p in produtores if p.status == 'ativo')
     if produtores:
+        # A referência é o intervalo de registros ("P001–P018"), como nas demais citações
+        # `[arquivo · registro]`; "cadastro" não é um registro do arquivo (F8 do Bloco 4).
+        ids = sorted(p.id for p in produtores)
+        intervalo = ids[0] if len(ids) == 1 else f'{ids[0]}–{ids[-1]}'
         secao.existe.append(
             f'Cadastro com {len(produtores)} produtores ({ativos} ativos, '
             f'{len(produtores) - ativos} inativo(s)), com nome, CPF, município e produtos. '
-            f'{fontes.add(Fonte(arquivo="produtores.csv", referencia="cadastro"))}'
+            f'{fontes.add(Fonte(arquivo="produtores.csv", referencia=intervalo))}'
         )
     for p in produtores:
         if not p.cpf:

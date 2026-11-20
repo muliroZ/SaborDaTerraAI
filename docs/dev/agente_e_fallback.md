@@ -105,6 +105,8 @@ Injetado automaticamente nas ferramentas e no prompt dinâmico via `RunContext[A
 - `usuario: str` — Operador ativo selecionado na interface (padrão `'Dona Lúcia'`).
 - `mascarador: Any` — Objeto com `.mascarar(str) -> str` e `.restaurar(str) -> str` (padrão `MascaradorNoOp()`).
 - `relatorios: list[Relatorio]` — Relatórios gerados pelas tools no turno (`#15`); o runner limpa no início e anexa à resposta na Etapa 4.
+- `rascunhos: list[Rascunho]` — Rascunhos montados por `resumir_produtor` e `rascunhar_notificacao` (via `registrar_rascunhos`); o runner limpa no início e, na Etapa 4, eles substituem os rascunhos do modelo sempre que uma dessas tools roda no turno.
+- `flags: list[Flag]` — Flags de conformidade e inadimplência montadas por `resumir_produtor` (via `registrar_flags`); na Etapa 4, substituem as do modelo nesses tipos.
 
 ### 3.2. Saída Estruturada do LLM (`RespostaAgente` — Etapa 3.4)
 - `texto: str` — Resposta em PT-BR para o operador interno.
@@ -112,6 +114,14 @@ Injetado automaticamente nas ferramentas e no prompt dinâmico via `RunContext[A
 - `flags: list[Flag]` — Alertas identificados (`fora_de_safra`, `acima_capacidade`, `conformidade`, `inadimplencia`, `ambiguidade`, `privacidade`).
 - `rascunhos: list[Rascunho]` — Mensagens prontas (`destinatario`, `conteudo` em formato padrão limpo e `canal: str | None = None`) para revisão da equipe.
 - `relatorios: list[Relatorio]` — **Fora do JSON Schema enviado ao LLM** (`SkipJsonSchema`): preenchido pelo runner com os relatórios das tools (`#15`), para o modelo não reescrever o arquivo.
+
+### 3.4. Saídas montadas pelas tools (Etapa 4)
+
+Na Etapa 4, o runner usa o que as tools montaram sem LLM no lugar do que o modelo redigitou (achados F3, F5, F8 e F9 em [`docs/avaliacao/bloco4_relatorios.md`](../avaliacao/bloco4_relatorios.md)):
+
+- **Rascunhos (`_anexar_rascunhos`):** quando `resumir_produtor` ou `rascunhar_notificacao` rodam, os rascunhos da resposta são os que elas registraram em `ctx.deps.rascunhos`, mascarados e sem duplicata, mesmo que a tool não tenha montado nenhum. Sem essas tools, valem os rascunhos do modelo.
+- **Flags (`_anexar_flags`):** os tipos de `TIPOS_FLAG_DAS_TOOLS` (conformidade e inadimplência do resumo) e os tipos que alguma tool registrou em `ctx.deps.flags` vêm só das tools. `rascunhar_notificacao` monta as flags com os motivos das regras (`Pedido.motivos_sinalizacoes`).
+- **Fontes (`_reconciliar_fontes_com_tools` e `_completar_fontes_dos_rascunhos`):** antes da 4B, corrige extensão trocada, citações juntadas numa fonte só, o formato `arquivo · registro` dentro da referência e a referência igual ao arquivo (descartada), só com correspondência exata nas fontes do turno. As fontes de `rascunhar_notificacao` sempre entram na resposta.
 
 ### 3.3. Retorno do Turno (`RespostaTurno`)
 Consolida a `RespostaAgente` + metadados técnicos e de auditoria:

@@ -349,3 +349,74 @@ def test_guardrail_saida_4a_permite_queijo_p003_no_banco_real(conn_banco_ou_pula
     )
     assert regras == []
     assert 'queijo coalho' in res_proc.texto
+
+
+class _ConexaoComVistoriaMista(_ConexaoPsycopgFalsa):
+    """Chunk de inspeção com um produtor regular e outro irregular em parágrafos separados,
+    como o "ESTABELECIMENTO INSPECIONADO" do relatório da ADAGRO."""
+
+    __module__ = 'psycopg.connection'  # a 4a só avalia conexões psycopg
+
+    def execute(self, query: str, params=None):
+        sql = ' '.join(query.lower().split())
+        if 'from chunks' in sql:
+            return _CursorFalso([(
+                'PRODUTORES VISTORIADOS:\n\n'
+                '  1. P001 - Maria (Garanhuns)\n     Produtos: Goiaba, acerola\n'
+                '     Situação: REGULAR\n\n'
+                '  5. P017 - Wellington (Garanhuns)\n     Produtos: Frango caipira\n'
+                '     Situação: IRREGULAR - sem registro no Serviço de Inspeção.',
+                None,
+            )])
+        if 'from produtos' in sql:
+            return _CursorFalso([('Goiaba',), ('Frango caipira',)])
+        return super().execute(query, params)
+
+
+def _rascunho_alocacao(pid: str, item: str) -> RespostaAgente:
+    return RespostaAgente(
+        texto='Rascunhos prontos para revisão.',
+        rascunhos=[Rascunho(
+            destinatario=f'Produtor ({pid})',
+            canal='whatsapp',
+            conteudo=(
+                f'Olá ({pid}), temos uma proposta de alocação:\n'
+                f'- Itens: quantidade a confirmar de {item}\n'
+                'Por favor, informe a disponibilidade para confirmação operacional.'
+            ),
+        )],
+    )
+
+
+def test_guardrail_saida_4a_restricao_vale_so_para_o_paragrafo_do_produtor_irregular():
+    """F3 do Bloco 4: o P001 regular, citado no mesmo chunk do P017, não herda a restrição."""
+    conn = _ConexaoComVistoriaMista()
+
+    res_goiaba, regras_goiaba = processar_guardrail_saida(
+        _rascunho_alocacao('P001', 'goiaba'), conn=conn, data_referencia=date(2026, 10, 30)
+    )
+    assert regras_goiaba == []
+    assert len(res_goiaba.rascunhos) == 1
+
+    _res, regras_frango = processar_guardrail_saida(
+        _rascunho_alocacao('P017', 'frango caipira'), conn=conn, data_referencia=date(2026, 10, 30)
+    )
+    assert any('4A_BLOQUEIO_SANITARIO' in r for r in regras_frango)
+
+
+def test_guardrail_saida_4a_libera_rascunhos_regulares_e_barra_frango_no_banco(conn_banco_ou_pula):
+    """Integração com o relatório real da ADAGRO: goiaba (P001) e queijo (P003) passam; frango
+    (P017) continua bloqueado."""
+    for pid, item in (('P001', 'goiaba'), ('P003', 'queijo coalho')):
+        res, regras = processar_guardrail_saida(
+            _rascunho_alocacao(pid, item), conn=conn_banco_ou_pula, data_referencia=date(2026, 10, 30)
+        )
+        assert regras == [], (pid, regras)
+        assert len(res.rascunhos) == 1
+
+    _res, regras = processar_guardrail_saida(
+        _rascunho_alocacao('P017', 'frango caipira'),
+        conn=conn_banco_ou_pula,
+        data_referencia=date(2026, 10, 30),
+    )
+    assert any('4A_BLOQUEIO_SANITARIO' in r for r in regras)

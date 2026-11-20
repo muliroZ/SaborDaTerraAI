@@ -213,6 +213,8 @@ def test_dossie_adagro_pedido_existe_e_falta(conn, busca_local):
     cadastro = _secao(md, 1)
     assert cadastro.startswith('Cadastro atualizado')
     assert 'P008' in cadastro
+    assert '[produtores.csv · P001–P018]' in cadastro  # registros reais, não "cadastro" (F8)
+    assert 'produtores.csv · cadastro' not in md
 
     certificacoes = _secao(md, 2)
     assert certificacoes.count('vigente até') == 8

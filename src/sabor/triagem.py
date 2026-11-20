@@ -16,6 +16,9 @@ exportada em CSV ou JSON (scripts/triagem_lote.py e a "Caixa de entrada" da inte
 - Erros temporários do provedor (limite por minuto, 503, conexão) são tentados de novo após
   uma espera; outra falha num pedido não derruba o lote: ele fica com `status = 'erro'` e é
   tentado de novo na próxima execução.
+- Itens: os itens classificados também vão para `pedido_itens`, a versão relacional que o
+  `resumir_produtor` consulta. A tabela acompanha `triagem_pedidos` na mesma transação: um
+  pedido sem triagem válida (erro ou ainda não triado) fica sem itens.
 """
 
 from __future__ import annotations
@@ -128,7 +131,57 @@ def hash_entrada(mensagem: str, recebido_em: datetime, modelo: str) -> str:
     return hashlib.sha256(chave.encode('utf-8')).hexdigest()
 
 
+def _gravar_itens(conn: psycopg.Connection, pedido_id: str, pedido: Pedido | None) -> None:
+    """Substitui os itens do pedido em `pedido_itens` pelos da classificação (`None` apaga).
+
+    Uma quantidade sem unidade fica nula, porque o schema não aceita número sem unidade. O
+    valor continua no `resultado` da triagem.
+    """
+    conn.execute('DELETE FROM pedido_itens WHERE pedido_id = %s', (pedido_id,))
+    if pedido is None or not pedido.itens:
+        return
+    linhas = []
+    for ordem, item in enumerate(pedido.itens, start=1):
+        com_unidade = item.unidade is not None and item.quantidade is not None
+        quantidade = item.quantidade if com_unidade and item.quantidade > 0 else None
+        linhas.append((
+            pedido_id,
+            ordem,
+            item.produto_texto,
+            item.produto_id,
+            quantidade,
+            item.unidade,
+            item.organico,
+            item.opcional,
+            item.ambiguo,
+            item.observacao,
+        ))
+    conn.cursor().executemany(
+        """
+        INSERT INTO pedido_itens (
+            pedido_id, ordem, produto_texto, produto_id, quantidade, unidade, organico,
+            opcional, ambiguo, observacao)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        linhas,
+    )
+
+
 def _gravar_ok(
+    conn: psycopg.Connection,
+    pedido_id: str,
+    hash_: str,
+    extracao: Pedido,
+    pedido: Pedido,
+    modelo: str,
+    uso: RunUsage,
+) -> None:
+    with conn.transaction():
+        _gravar_triagem_ok(conn, pedido_id, hash_, extracao, pedido, modelo, uso)
+        _gravar_itens(conn, pedido_id, pedido)
+
+
+def _gravar_triagem_ok(
     conn: psycopg.Connection,
     pedido_id: str,
     hash_: str,
@@ -173,57 +226,65 @@ def _gravar_ok(
 
 def _gravar_reclassificacao(conn: psycopg.Connection, pedido_id: str, pedido: Pedido) -> None:
     """Novo resultado das regras sobre a extração gravada; consumo e modelo não mudam."""
-    conn.execute(
-        """
-        UPDATE triagem_pedidos SET
-            status = 'ok', tipo = %s, urgencia = %s, comprador = %s, data_entrega = %s,
-            sinalizacoes = %s, resultado = %s, erro = NULL, classificado_em = now()
-        WHERE pedido_id = %s
-        """,
-        (
-            pedido.tipo,
-            pedido.urgencia,
-            pedido.comprador.nome,
-            pedido.entrega.data,
-            pedido.sinalizacoes,
-            Jsonb(pedido.model_dump(mode='json')),
-            pedido_id,
-        ),
-    )
+    with conn.transaction():
+        conn.execute(
+            """
+            UPDATE triagem_pedidos SET
+                status = 'ok', tipo = %s, urgencia = %s, comprador = %s, data_entrega = %s,
+                sinalizacoes = %s, resultado = %s, erro = NULL, classificado_em = now()
+            WHERE pedido_id = %s
+            """,
+            (
+                pedido.tipo,
+                pedido.urgencia,
+                pedido.comprador.nome,
+                pedido.entrega.data,
+                pedido.sinalizacoes,
+                Jsonb(pedido.model_dump(mode='json')),
+                pedido_id,
+            ),
+        )
+        _gravar_itens(conn, pedido_id, pedido)
 
 
 def _gravar_erro_extracao(
     conn: psycopg.Connection, pedido_id: str, hash_: str, erro: str, modelo: str, uso: RunUsage
 ) -> None:
     # Um erro substitui o resultado anterior: ele não corresponde mais ao `hash_entrada`.
-    conn.execute(
-        """
-        INSERT INTO triagem_pedidos (
-            pedido_id, hash_entrada, status, erro, modelo, requisicoes, tokens_entrada,
-            tokens_saida, processado_em)
-        VALUES (%s, %s, 'erro', %s, %s, %s, %s, %s, now())
-        ON CONFLICT (pedido_id) DO UPDATE SET
-            hash_entrada = EXCLUDED.hash_entrada, status = 'erro', tipo = NULL, urgencia = NULL,
-            comprador = NULL, data_entrega = NULL, sinalizacoes = '{}', extracao_llm = NULL,
-            resultado = NULL, erro = EXCLUDED.erro, modelo = EXCLUDED.modelo,
-            requisicoes = EXCLUDED.requisicoes, tokens_entrada = EXCLUDED.tokens_entrada,
-            tokens_saida = EXCLUDED.tokens_saida, processado_em = now(), classificado_em = NULL
-        """,
-        (pedido_id, hash_, erro, modelo, uso.requests, uso.input_tokens, uso.output_tokens),
-    )
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO triagem_pedidos (
+                pedido_id, hash_entrada, status, erro, modelo, requisicoes, tokens_entrada,
+                tokens_saida, processado_em)
+            VALUES (%s, %s, 'erro', %s, %s, %s, %s, %s, now())
+            ON CONFLICT (pedido_id) DO UPDATE SET
+                hash_entrada = EXCLUDED.hash_entrada, status = 'erro', tipo = NULL,
+                urgencia = NULL, comprador = NULL, data_entrega = NULL, sinalizacoes = '{}',
+                extracao_llm = NULL, resultado = NULL, erro = EXCLUDED.erro,
+                modelo = EXCLUDED.modelo, requisicoes = EXCLUDED.requisicoes,
+                tokens_entrada = EXCLUDED.tokens_entrada, tokens_saida = EXCLUDED.tokens_saida,
+                processado_em = now(), classificado_em = NULL
+            """,
+            (pedido_id, hash_, erro, modelo, uso.requests, uso.input_tokens, uso.output_tokens),
+        )
+        _gravar_itens(conn, pedido_id, None)
 
 
 def _gravar_erro_regras(conn: psycopg.Connection, pedido_id: str, erro: str) -> None:
     # Mantém `extracao_llm`: o próximo lote tenta as regras de novo sem chamar o modelo.
-    conn.execute(
-        """
-        UPDATE triagem_pedidos SET
-            status = 'erro', tipo = NULL, urgencia = NULL, comprador = NULL, data_entrega = NULL,
-            sinalizacoes = '{}', resultado = NULL, erro = %s, classificado_em = now()
-        WHERE pedido_id = %s
-        """,
-        (erro, pedido_id),
-    )
+    with conn.transaction():
+        conn.execute(
+            """
+            UPDATE triagem_pedidos SET
+                status = 'erro', tipo = NULL, urgencia = NULL, comprador = NULL,
+                data_entrega = NULL, sinalizacoes = '{}', resultado = NULL, erro = %s,
+                classificado_em = now()
+            WHERE pedido_id = %s
+            """,
+            (erro, pedido_id),
+        )
+        _gravar_itens(conn, pedido_id, None)
 
 
 def _descrever_erro(exc: Exception) -> str:

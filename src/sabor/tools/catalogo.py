@@ -80,6 +80,11 @@ class Catalogo:
                 return produto
         return None
 
+    def resolver_exato(self, texto: str | None) -> ProdutoCatalogo | None:
+        """Só o passo 1: nome ou sinônimo exato, sem correspondência por palavras."""
+        chave = _palavras(texto)
+        return self._por_chave.get(chave) if chave else None
+
     def _por_palavras(self, chave: tuple[str, ...]) -> ProdutoCatalogo | None:
         presentes = set(chave)
         contidos = [

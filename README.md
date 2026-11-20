@@ -72,8 +72,10 @@ docker compose up -d                  # sobe o Postgres 17 com pgvector (volume 
 uv run python scripts/init_db.py      # cria todas as tabelas do schema (idempotente)
 uv run python scripts/etl.py          # popula as tabelas estruturadas (reseta dados e índices)
 uv run python scripts/ingest_docs.py  # ingere documentos e gera embeddings (vector 768 + tsvector)
+uv run python scripts/triagem_lote.py # extrai os itens dos pedidos (LLM) para `pedido_itens`
 ```
 
+- **Triagem depois da carga:** o ETL esvazia `pedidos` e, em cascata, a triagem e os itens. Rode a triagem depois de cada carga: o resumo por produtor lista os pedidos em aberto a partir de `pedido_itens`.
 - **Reset completo do schema:** `uv run python scripts/init_db.py --reset`
 - **Derrubar banco e volume:** `docker compose down -v`
 - **DDL e busca híbrida:** definidos em [`src/sabor/sql/schema.sql`](src/sabor/sql/schema.sql) (embeddings `vector(768)` com índice HNSW cosseno + `tsvector`).

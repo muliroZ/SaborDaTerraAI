@@ -136,6 +136,8 @@ def _ctx(
         data_referencia=data_referencia,
         usuario=usuario,
         mascarador=mascarador,
+        rascunhos=[],
+        flags=[],
     )
     return SimpleNamespace(deps=deps)
 
@@ -191,6 +193,7 @@ async def test_usuario_none_nao_quebra_e_atua_como_equipe():
     assert len(res.rascunhos) == 1
     assert "05/11/2026" in res.rascunhos[0].conteudo
     assert "28/10/2026" not in res.rascunhos[0].conteudo
+    assert ctx.deps.rascunhos == res.rascunhos  # o runner anexa estes, não os do modelo (F3)
 
 
 @pytest.mark.anyio
@@ -571,3 +574,73 @@ async def test_integracao_postgres_matriz_exclui_p008_e_p017(conn):
     assert not any("P017" in d for d in dests_006)
     assert any(f.tipo == "inadimplencia" for f in res_006.flags)
     assert "validação da gestão" in res_006.texto.lower()
+
+
+@pytest.mark.anyio
+async def test_itens_nao_alocados_aparecem_no_texto_e_nas_flags():
+    """F2 do Bloco 4: item ambíguo ou sem produtor elegível não some em silêncio."""
+    pedido = Pedido(
+        pedido_id="PED-2026-002",
+        tipo="compra_recorrente",
+        comprador=Comprador(nome="Mercado Bom Preço"),
+        entrega=Entrega(data=date(2026, 11, 3), data_texto="terça 03/11"),
+        itens=[
+            Item(produto_texto="goiaba", produto="goiaba", quantidade=50.0, unidade="kg",
+                 produtores_elegiveis=["P001"]),
+            Item(produto_texto="manteiga", quantidade=5.0, unidade="kg", ambiguo=True,
+                 observacao="manteiga de garrafa ou queijo manteiga"),
+            Item(produto_texto="cajá", produto="cajá", quantidade=10.0, unidade="kg"),
+        ],
+    )
+    conn = _ConexaoPsycopgFalsa(
+        pedidos_rows={
+            "PED-2026-002": ("PED-2026-002", "compra", "Mercado Bom Preço", "pedido",
+                             datetime(2026, 10, 27, 9, 0)),
+        },
+        nomes_produtores={"P001": "Maria Silva"},
+    )
+    ctx = _ctx(conn=conn)
+
+    with patch(
+        "sabor.tools.rascunhar_notificacao.extrair_e_classificar",
+        new=AsyncMock(return_value=pedido),
+    ):
+        res = await rascunhar_notificacao(ctx, pedido_id="PED-2026-002")
+
+    assert [r.destinatario for r in res.rascunhos] == ["Maria Silva (P001)"]
+    assert "Itens sem alocação" in res.texto
+    assert "5 kg de manteiga: produto ambíguo" in res.texto
+    assert "manteiga de garrafa ou queijo manteiga" in res.texto
+    assert "10 kg de cajá: nenhum produtor elegível" in res.texto
+    descricoes = {f.tipo: f.descricao for f in res.flags if "Item" in f.descricao}
+    assert "5 kg de manteiga" in descricoes["ambiguidade"]
+    assert "10 kg de cajá" in descricoes["sem_produtor_elegivel"]
+    assert ctx.deps.flags == res.flags  # o runner anexa estas, não as do modelo (F9)
+
+
+def test_flags_das_sinalizacoes_usam_os_motivos_das_regras():
+    """F9 do Bloco 4: uma flag por sinalização, com o que as regras encontraram."""
+    from sabor.agent.schemas import Flag
+    from sabor.tools.rascunhar_notificacao import _flags_das_sinalizacoes
+
+    pedido = Pedido(
+        pedido_id="PED-X",
+        tipo="compra",
+        entrega=Entrega(data_texto="terça 04/nov", alerta="04/11/2026 cai numa quarta-feira."),
+        sinalizacoes=["conformidade", "data_inconsistente", "privacidade", "ambiguidade"],
+        motivos_sinalizacoes={
+            "conformidade": [f"P0{n:02d} sem DAP/CAF (goiaba)" for n in range(1, 8)],
+        },
+    )
+    item_ambiguo = Flag(tipo="ambiguidade", descricao="Item não alocado, produto ambíguo: manteiga.")
+
+    flags = {f.tipo: f.descricao for f in _flags_das_sinalizacoes(pedido, [item_ambiguo])}
+
+    assert flags["conformidade"] == (
+        "P001 sem DAP/CAF (goiaba); P002 sem DAP/CAF (goiaba); P003 sem DAP/CAF (goiaba); "
+        "P004 sem DAP/CAF (goiaba); P005 sem DAP/CAF (goiaba). (+2 outros)"
+    )
+    assert flags["data_inconsistente"] == "04/11/2026 cai numa quarta-feira."
+    assert flags["privacidade"].startswith("A mensagem traz dados pessoais")
+    assert "ambiguidade" not in flags  # o item ambíguo já tem flag própria
+    assert not any("Sinalização regulatória" in d for d in flags.values())
