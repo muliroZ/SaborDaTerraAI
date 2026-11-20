@@ -538,35 +538,110 @@ def _fontes_estruturadas_das_tools(novas_mensagens: Sequence[ModelMessage]) -> l
     return fontes
 
 
-def _reparar_extensao_das_fontes(
+def _dividir_citacoes(fonte: Fonte) -> list[Fonte]:
+    """Quebra `P001, P004 e P005` ou `a.txt · X, b.txt · Y` em uma fonte por citação.
+
+    Um pedaço sem `·` herda o arquivo do pedaço anterior.
+    """
+    arquivo_atual = fonte.arquivo.strip()
+    citacoes: list[Fonte] = []
+    for pedaco in re.split(r'\s*(?:,|;|\be\b)\s*', f'{arquivo_atual} · {fonte.referencia}'):
+        if not pedaco.strip():
+            continue
+        if '·' in pedaco:
+            partes = [p.strip() for p in pedaco.split('·') if p.strip()]
+            arquivo_atual, referencia = partes[0], partes[-1]
+        else:
+            referencia = pedaco.strip()
+        citacoes.append(Fonte(arquivo=arquivo_atual, referencia=referencia))
+    return citacoes
+
+
+def _reconciliar_fontes_com_tools(
     resposta: RespostaAgente, fontes_tools: Sequence[Fonte]
 ) -> RespostaAgente:
-    """Corrige a extensão de uma fonte que o modelo redigitou errado.
+    """Desfaz dois erros do modelo ao redigitar fontes que as tools retornaram (F8 do Bloco 4).
 
-    O modelo copia as fontes das tools e às vezes troca a extensão (`laudo…P003.txt` virou
-    `.csv`, `.___` e `.quist.txt` no REL-04 do Bloco 4). A regra 4B bloqueava a resposta
-    inteira por isso. Só se repara a fonte quando uma fonte retornada no turno tem a mesma
-    referência, a mesma pasta e o mesmo nome, mudando só a extensão. Uma fonte inventada
-    continua sem correspondência e é barrada pela 4B.
+    - Extensão trocada: `laudo…P003.txt` virou `.csv`, `.___` e `.quist.txt` no REL-04, e a
+      regra 4B bloqueava a resposta inteira. A fonte é reparada só quando uma fonte do turno
+      tem a mesma referência, a mesma pasta e o mesmo nome, mudando só a extensão.
+    - Citações juntadas numa fonte só: `produtores.csv · P001, P004, P005` no REL-08, ou
+      várias certificações de arquivos diferentes no REL-07. A fonte é dividida só quando
+      cada pedaço é uma fonte retornada no turno.
+    - Referência com o formato inteiro (`referencia="produtores.csv · P017"`, REL-07): o
+      prefixo com o arquivo sai.
+    - Referência igual ao arquivo (`produtores.csv · produtores.csv`, REL-07): não aponta
+      registro nenhum e é descartada.
+
+    Uma fonte inventada não tem correspondência, fica como veio e é barrada pela 4B.
     """
     exatas = {(f.arquivo.strip(), f.referencia.strip().lower()) for f in fontes_tools}
     por_nome = {
         (_sem_extensao(f.arquivo), f.referencia.strip().lower()): f.arquivo.strip()
         for f in fontes_tools
     }
-    reparadas: list[Fonte] = []
+
+    def reparar(fonte: Fonte) -> Fonte:
+        ref = fonte.referencia.strip().lower()
+        if (fonte.arquivo.strip(), ref) in exatas:
+            return fonte
+        original = por_nome.get((_sem_extensao(fonte.arquivo), ref))
+        return fonte.model_copy(update={'arquivo': original}) if original else fonte
+
+    reconciliadas: list[Fonte] = []
     vistas: set[tuple[str, str]] = set()
     for fonte in resposta.fontes:
-        ref = fonte.referencia.strip().lower()
-        if (fonte.arquivo.strip(), ref) not in exatas:
-            original = por_nome.get((_sem_extensao(fonte.arquivo), ref))
-            if original is not None:
-                fonte = fonte.model_copy(update={'arquivo': original})
-        chave = (fonte.arquivo.strip(), ref)
+        # Referência com o formato inteiro (`produtores.csv · P017` dentro de `referencia`).
+        prefixo = re.compile(rf'^\s*{re.escape(fonte.arquivo.strip())}\s*·\s*')
+        if prefixo.match(fonte.referencia):
+            fonte = fonte.model_copy(update={'referencia': prefixo.sub('', fonte.referencia)})
+        # `produtores.csv · produtores.csv` (REL-07) não aponta registro nenhum: descarta.
+        if not fonte.referencia.strip() or fonte.referencia.strip() == fonte.arquivo.strip():
+            continue
+        fonte = reparar(fonte)
+        candidatas = [fonte]
+        if (fonte.arquivo.strip(), fonte.referencia.strip().lower()) not in exatas:
+            divididas = [reparar(f) for f in _dividir_citacoes(fonte)]
+            if len(divididas) > 1 and all(
+                (f.arquivo.strip(), f.referencia.strip().lower()) in exatas for f in divididas
+            ):
+                candidatas = divididas
+        for candidata in candidatas:
+            chave = (candidata.arquivo.strip(), candidata.referencia.strip().lower())
+            if chave not in vistas:
+                vistas.add(chave)
+                reconciliadas.append(candidata)
+    return resposta.model_copy(update={'fontes': reconciliadas})
+
+
+TOOLS_COM_FONTES_DOS_RASCUNHOS = frozenset({'rascunhar_notificacao'})
+"""Tools cujas fontes (pedido e produtores de cada rascunho) sempre entram na resposta."""
+
+
+def _completar_fontes_dos_rascunhos(
+    resposta: RespostaAgente, novas_mensagens: Sequence[ModelMessage]
+) -> RespostaAgente:
+    """Acrescenta as fontes de `rascunhar_notificacao` que o modelo não citou.
+
+    Os rascunhos são anexados sem passar pelo modelo (F3); as fontes deles também devem
+    estar na resposta. No REL-08 do Bloco 4, o modelo citou só o pedido em 2 de 3 rodadas.
+    """
+    retornos = [
+        part
+        for msg in novas_mensagens
+        for part in getattr(msg, 'parts', None) or ()
+        if isinstance(part, ToolReturnPart) and part.tool_name in TOOLS_COM_FONTES_DOS_RASCUNHOS
+    ]
+    if not retornos:
+        return resposta
+    fontes = list(resposta.fontes)
+    vistas = {(f.arquivo.strip(), f.referencia.strip().lower()) for f in fontes}
+    for fonte in _fontes_estruturadas_das_tools([ModelRequest(parts=retornos)]):
+        chave = (fonte.arquivo.strip(), fonte.referencia.strip().lower())
         if chave not in vistas:
             vistas.add(chave)
-            reparadas.append(fonte)
-    return resposta.model_copy(update={'fontes': reparadas})
+            fontes.append(fonte)
+    return resposta.model_copy(update={'fontes': fontes})
 
 
 def _extrair_fontes_das_tools(novas_mensagens: Sequence[ModelMessage]) -> list[str]:
@@ -877,9 +952,10 @@ def processar_turno(
                 conn_propria.rollback()
 
         # Guardrail de saída aqui!
-        resposta_final = _reparar_extensao_das_fontes(
+        resposta_final = _reconciliar_fontes_com_tools(
             resposta_final, _fontes_estruturadas_das_tools(resultado.new_messages())
         )
+        resposta_final = _completar_fontes_dos_rascunhos(resposta_final, resultado.new_messages())
         fontes_turno = _extrair_fontes_das_tools(resultado.new_messages())
         resposta_final, regras_saida = processar_guardrail_saida(
             resposta_final,

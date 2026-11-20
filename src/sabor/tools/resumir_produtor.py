@@ -553,7 +553,8 @@ def resumir_produtor(
             if origem_animal and not registro_sie:
                 continue
 
-            fonte_ped = Fonte(arquivo='pedidos.csv', referencia=ped_id)
+            # Mesmo arquivo citado pelas outras tools: a carga lê `pedidos.json`.
+            fonte_ped = Fonte(arquivo='pedidos.json', referencia=ped_id)
             _adicionar_fonte(fonte_ped)
             deve_vencido = round(sum(
                 valor

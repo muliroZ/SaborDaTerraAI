@@ -174,7 +174,7 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
   - Agora `resumir_produtor` monta as flags de `conformidade` (alertas documentais) e de `inadimplencia` (uma por comprador com vencido) e as registra em `AgentDeps.flags`.
   - Na Etapa 4, `_anexar_flags` usa essas flags no lugar das do modelo nesses dois tipos. Os demais tipos, como `ambiguidade`, continuam. O prompt diz para não repeti-las.
 - **Regressão encontrada e corrigida (fontes):** o REL-04 passou a ser bloqueado pela 4B (3/3), porque o modelo redigitava a fonte do laudo com a extensão errada (`.csv`, `.___`, `.quist.txt`).
-  - `_reparar_extensao_das_fontes` corrige a fonte só quando uma fonte retornada no turno tem a mesma pasta, o mesmo nome e a mesma referência, mudando só a extensão.
+  - `_reconciliar_fontes_com_tools` (antes `_reparar_extensao_das_fontes`) corrige a fonte só quando uma fonte retornada no turno tem a mesma pasta, o mesmo nome e a mesma referência, mudando só a extensão.
   - Uma fonte inventada continua sendo barrada. Ver também o [F8](#f8).
 - **Testes:**
   - `test_resumo_diz_quem_deve_ao_produtor` (com as flags);
@@ -245,7 +245,30 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
   - O REL-03 da rodada 1 cita só FIN-2026-006 para a P004, que também tem a FIN-2026-007.
 - **Correção sugerida:** juntar às `fontes` da resposta as fontes retornadas pelas tools (`_extrair_fontes_das_tools` já as coleta para a regra 4b), em vez de depender da lista que o modelo redige.
 
-**Status: parcial.** A extensão errada numa fonte retornada pela tool agora é reparada antes da 4B (ver o [F5](#f5)). Continuam em aberto as fontes agregadas pelo modelo (`produtores.csv · P001, P004, …` no REL-08), a fonte `pedidos.csv`, que deveria ser `pedidos.json`, no `resumir_produtor`, e `produtores.csv · cadastro` no dossiê.
+**Status: resolvido.**
+
+- **Fontes fixas no código:**
+  - `resumir_produtor` passa a citar `pedidos.json`, como as demais tools e a carga, e não mais `pedidos.csv`.
+  - O dossiê cita o cadastro pelo intervalo real de registros (`produtores.csv · P001–P018`) em vez de `produtores.csv · cadastro`.
+- **Fontes redigitadas pelo modelo:** `_reconciliar_fontes_com_tools` (`src/sabor/agent/runner.py`) corrige, antes da 4B, só o que tem correspondência exata nas fontes retornadas no turno:
+  - extensão trocada (ver o [F5](#f5));
+  - citações juntadas numa fonte só, tanto do mesmo arquivo (`produtores.csv · P001, P004, P005`) quanto de arquivos diferentes (várias certificações copiadas do destaque);
+  - o formato inteiro dentro da referência (`referencia="produtores.csv · P017"`);
+  - a referência igual ao arquivo (`produtores.csv · produtores.csv`), que é descartada.
+
+  Uma fonte sem correspondência fica como veio, e a 4B decide.
+- **Fontes dos rascunhos:** quando `rascunhar_notificacao` roda, as fontes dela (o pedido e um produtor por rascunho) entram na resposta (`_completar_fontes_dos_rascunhos`). No REL-08, o modelo citava só o pedido em 2 de 3 rodadas.
+- **Testes:**
+  - `test_divide_fonte_com_registros_juntados_so_se_todos_vieram_das_tools`;
+  - `test_descarta_fonte_cuja_referencia_e_o_proprio_arquivo`;
+  - `test_fontes_dos_rascunhos_entram_mesmo_se_o_modelo_nao_citar`;
+  - asserções de `pedidos.json` (triagem) e de `P001–P018` (dossiê).
+
+  Falham sem a correção.
+- **Validação com o agente:** REL-07, REL-08 e REL-04, 5 rodadas, 15 turnos.
+  - Nenhuma fonte malformada e nenhum bloqueio do guardrail.
+  - O REL-08 cita o pedido e os 7 produtores dos rascunhos em 5/5.
+  - Cada variação tratada acima apareceu em alguma rodada intermediária antes de ser coberta.
 
 ### F9
 

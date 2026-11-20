@@ -1068,7 +1068,7 @@ def test_flags_do_modelo_ficam_quando_o_resumo_nao_roda():
 
 def test_repara_so_a_extensao_de_fonte_retornada_pela_tool():
     """REL-04 do Bloco 4: o modelo trocou a extensão do laudo, e a 4B bloqueava a resposta."""
-    from sabor.agent.runner import _reparar_extensao_das_fontes
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
     from sabor.agent.schemas import Fonte, RespostaAgente
 
     laudo = 'laudos/laudo_sanitario_queijaria_cicero_P003.txt'
@@ -1081,7 +1081,7 @@ def test_repara_so_a_extensao_de_fonte_retornada_pela_tool():
         Fonte(arquivo='laudos/laudo_inventado_P003.txt', referencia='LAUDO'),
     ])
 
-    fontes = _reparar_extensao_das_fontes(resposta, tools).fontes
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
 
     assert [(f.arquivo, f.referencia) for f in fontes] == [
         (laudo, 'LAUDO'),  # .csv e .quist.txt viram a mesma fonte, sem duplicar
@@ -1089,4 +1089,97 @@ def test_repara_so_a_extensao_de_fonte_retornada_pela_tool():
         # Outra referência ou outro arquivo: fica como veio, e a 4B decide.
         ('laudos/laudo_sanitario_queijaria_cicero_P003.csv', 'VALIDADE'),
         ('laudos/laudo_inventado_P003.txt', 'LAUDO'),
+    ]
+
+
+def test_divide_fonte_com_registros_juntados_so_se_todos_vieram_das_tools():
+    """REL-08 do Bloco 4: `produtores.csv · P001, P004, P005` vira uma fonte por produtor."""
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    tools = [Fonte(arquivo='produtores.csv', referencia=pid) for pid in ('P001', 'P004', 'P005')]
+    tools.append(Fonte(arquivo='pedidos.json', referencia='PED-2026-002'))
+    tools += [Fonte(arquivo=f'certificacoes/cert_{p}.txt', referencia='PRODUTOS CERTIFICADOS')
+              for p in ('P001', 'P002')]
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='pedidos.json', referencia='PED-2026-002'),
+        Fonte(arquivo='produtores.csv', referencia='P001, P004 e P005'),
+        Fonte(arquivo='produtores.csv', referencia='P001, P099'),  # P099 não veio das tools
+        Fonte(arquivo='produtores.csv', referencia='P004'),  # repetida depois da divisão
+        # REL-07: citações de arquivos diferentes copiadas do destaque para uma fonte só.
+        Fonte(arquivo='certificacoes/cert_P001.txt',
+              referencia='PRODUTOS CERTIFICADOS, certificacoes/cert_P002.txt · PRODUTOS CERTIFICADOS'),
+    ])
+
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [
+        ('pedidos.json', 'PED-2026-002'),
+        ('produtores.csv', 'P001'),
+        ('produtores.csv', 'P004'),
+        ('produtores.csv', 'P005'),
+        ('produtores.csv', 'P001, P099'),  # fica como veio: a 4B decide
+        ('certificacoes/cert_P001.txt', 'PRODUTOS CERTIFICADOS'),
+        ('certificacoes/cert_P002.txt', 'PRODUTOS CERTIFICADOS'),
+    ]
+
+
+def test_descarta_fonte_cuja_referencia_e_o_proprio_arquivo():
+    """REL-07 do Bloco 4: `produtores.csv · produtores.csv` não aponta registro nenhum, e
+    `produtores.csv · P017` dentro da referência perde o prefixo do arquivo."""
+    from sabor.agent.runner import _reconciliar_fontes_com_tools
+    from sabor.agent.schemas import Fonte, RespostaAgente
+
+    resposta = RespostaAgente(texto='ok', fontes=[
+        Fonte(arquivo='produtores.csv', referencia='produtores.csv'),
+        Fonte(arquivo='produtores.csv', referencia='produtores.csv · P017'),  # formato inteiro
+        Fonte(arquivo='produtores.csv', referencia='P017'),
+    ])
+    tools = [Fonte(arquivo='produtores.csv', referencia='P017')]
+
+    fontes = _reconciliar_fontes_com_tools(resposta, tools).fontes
+
+    assert [(f.arquivo, f.referencia) for f in fontes] == [('produtores.csv', 'P017')]
+
+
+def test_fontes_dos_rascunhos_entram_mesmo_se_o_modelo_nao_citar():
+    """REL-08 do Bloco 4: o modelo citava só o pedido; os produtores dos rascunhos sumiam."""
+    from sabor.agent.schemas import Fonte, Rascunho, RespostaAgente
+    from sabor.tools.base import registrar_rascunhos
+
+    def rascunhar_notificacao(ctx: RunContext[AgentDeps], pedido_id: str) -> RespostaAgente:
+        rascunhos = [Rascunho(destinatario=f'Produtor ({p})', canal='whatsapp', conteudo='Olá')
+                     for p in ('P001', 'P010')]
+        registrar_rascunhos(ctx.deps, rascunhos)
+        return RespostaAgente(
+            texto='Proposta de alocação.',
+            rascunhos=rascunhos,
+            fontes=[Fonte(arquivo='pedidos.json', referencia=pedido_id),
+                    Fonte(arquivo='produtores.csv', referencia='P001'),
+                    Fonte(arquivo='produtores.csv', referencia='P010')],
+        )
+
+    final = {
+        'texto': 'Rascunhos prontos.',
+        'fontes': [{'arquivo': 'pedidos.json', 'referencia': 'PED-2026-002'}],
+    }
+    agente = criar_agente(
+        [_modelo_chama_tools_e_responde(
+            [ToolCallPart(tool_name='rascunhar_notificacao', args={'pedido_id': 'PED-2026-002'})],
+            final,
+        )],
+        tools=[rascunhar_notificacao],
+    )
+    turno = processar_turno(
+        'sess-fontes-rasc',
+        'rascunhe para os elegíveis do PED-2026-002',
+        agente=agente,
+        deps=AgentDeps(conn=MagicMock(), mascarador=_MascaradorFake()),
+        guardrail_entrada=lambda _m: None,
+    )
+
+    assert [(f.arquivo, f.referencia) for f in turno.fontes] == [
+        ('pedidos.json', 'PED-2026-002'),
+        ('produtores.csv', 'P001'),
+        ('produtores.csv', 'P010'),
     ]
