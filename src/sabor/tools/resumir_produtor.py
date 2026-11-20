@@ -93,43 +93,100 @@ _TERMOS_NC_ADAGRO = (
 _PADRAO_PRODUTOR_ID = re.compile(r'\bP\d{3}\b', re.IGNORECASE)
 
 
-def _chunk_tem_nc_para_produtor(
-    texto_nc: str,
-    prod_id: str,
-    doc_produtor_id: str | None,
-) -> bool:
-    """Verifica se há apontamento/NC aplicável ao `prod_id` no chunk.
+def _blocos_do_produtor(texto_nc: str, prod_id: str, doc_produtor_id: str | None) -> list[str]:
+    """Trechos do chunk que dizem respeito ao `prod_id`.
 
-    Em documentos individuais (`doc_produtor_id == prod_id`), avalia o chunk inteiro.
+    Em documentos individuais (`doc_produtor_id == prod_id`), é o chunk inteiro.
     Em documentos coletivos (`doc_produtor_id is None`, ex.: relatório da ADAGRO),
     isola apenas os blocos/linhas que citam o `prod_id` para não atribuir a um produtor
     regular a não conformidade de outro produtor citado no mesmo chunk.
     """
     if doc_produtor_id is not None and doc_produtor_id.upper() == prod_id.upper():
-        blocos = [texto_nc]
-    else:
-        padrao_alvo = re.compile(rf'\b{re.escape(prod_id)}\b', re.IGNORECASE)
-        blocos = []
-        for paragrafo in re.split(r'\n\s*\n+', texto_nc):
-            if not padrao_alvo.search(paragrafo):
-                continue
-            outros = {
-                pid.upper()
-                for pid in _PADRAO_PRODUTOR_ID.findall(paragrafo)
-                if pid.upper() != prod_id.upper()
-            }
-            if outros:
-                blocos.extend(
-                    linha for linha in paragrafo.splitlines() if padrao_alvo.search(linha)
-                )
-            else:
-                blocos.append(paragrafo)
+        return [texto_nc]
+    padrao_alvo = re.compile(rf'\b{re.escape(prod_id)}\b', re.IGNORECASE)
+    blocos: list[str] = []
+    for paragrafo in re.split(r'\n\s*\n+', texto_nc):
+        if not padrao_alvo.search(paragrafo):
+            continue
+        outros = {
+            pid.upper()
+            for pid in _PADRAO_PRODUTOR_ID.findall(paragrafo)
+            if pid.upper() != prod_id.upper()
+        }
+        if outros:
+            blocos.extend(
+                linha for linha in paragrafo.splitlines() if padrao_alvo.search(linha)
+            )
+        else:
+            blocos.append(paragrafo)
+    return blocos
 
-    for bloco in blocos:
-        bloco_low = bloco.lower()
-        if any(termo in bloco_low for termo in _TERMOS_NC_ADAGRO):
-            return True
-    return False
+
+def _chunk_tem_nc_para_produtor(
+    texto_nc: str,
+    prod_id: str,
+    doc_produtor_id: str | None,
+) -> bool:
+    """Verifica se há apontamento/NC aplicável ao `prod_id` no chunk."""
+    return any(
+        any(termo in bloco.lower() for termo in _TERMOS_NC_ADAGRO)
+        for bloco in _blocos_do_produtor(texto_nc, prod_id, doc_produtor_id)
+    )
+
+
+_PADRAO_NC = re.compile(r'NC-(\d+)\s*\(([^)]+)\)\s*:\s*([^\n]+)', re.IGNORECASE)
+_PADRAO_NUMERO_DOC = re.compile(r'(?:Laudo|Relat[óo]rio)\s+N[º°o]\.?\s*:\s*(\S+)', re.IGNORECASE)
+
+
+def _descrever_ncs(bloco: str) -> list[str]:
+    """Descreve cada NC do bloco com código, severidade, prazo e status.
+
+    Ex.: "NC-001 (menor): Lixeira sem pedal (prazo: …; status: pendente de verificação)".
+    """
+    descricoes: list[str] = []
+    for parte in re.split(r'(?=\bNC-\d+)', bloco):
+        achado = _PADRAO_NC.match(parte.strip())
+        if achado is None:
+            continue
+        codigo, severidade, descricao = achado.groups()
+        texto = f'NC-{codigo} ({severidade.strip().lower()}): {descricao.strip().rstrip(".")}'
+        extras = []
+        if prazo := re.search(r'Prazo[^:\n]*:\s*([^\n]+)', parte, re.IGNORECASE):
+            extras.append(f'prazo: {prazo.group(1).strip().rstrip(".")}')
+        if status := re.search(r'Status:\s*([^\n]+)', parte, re.IGNORECASE):
+            extras.append(f'status: {status.group(1).strip().rstrip(".").lower()}')
+        if extras:
+            texto += f" ({'; '.join(extras)})"
+        descricoes.append(texto)
+    return descricoes
+
+
+def _rotulo_documento(
+    conn: psycopg.Connection, arquivo: str, tipo_doc: str | None, titulo: str | None
+) -> str:
+    """Identifica o documento pelo cabeçalho, com tipo, número e órgão emissor.
+
+    Ex.: "Laudo VS-CAE-2026-0034 (Vigilância Sanitária Municipal de Caetés)".
+
+    O órgão vem do próprio documento: o laudo do Cícero é da vigilância municipal, não da
+    ADAGRO (F7 do Bloco 4).
+    """
+    cabecalho = conn.execute(
+        'SELECT texto FROM chunks WHERE arquivo = %s ORDER BY ordem LIMIT 1', (arquivo,)
+    ).fetchone()
+    texto = cabecalho[0] if cabecalho else ''
+    numero = _PADRAO_NUMERO_DOC.search(texto)
+    orgao = next(
+        (
+            linha.strip()
+            for linha in texto.splitlines()
+            if linha.strip() and not linha.strip().startswith('=')
+        ),
+        None,
+    )
+    tipo = 'Inspeção' if tipo_doc == 'inspecao' else 'Laudo' if tipo_doc == 'laudo' else 'Documento'
+    rotulo = f'{tipo} {numero.group(1)}' if numero else (titulo or tipo)
+    return f'{rotulo} ({orgao})' if orgao else rotulo
 
 
 def _remover_acentos(texto: str) -> str:
@@ -385,26 +442,52 @@ def resumir_produtor(
     elif cert_organica and data_val_efetiva is None:
         alertas.append('Certificação orgânica declarada sem data de validade comprovada.')
 
-    # Busca NCs da ADAGRO nos chunks do próprio produtor OU no relatório geral de inspeção
+    # Não conformidades nos documentos do próprio produtor (laudos) ou no relatório coletivo
+    # de inspeção. O alerta diz de onde veio, com número, órgão, severidade e status, sem o
+    # caminho do arquivo, porque ele vai no rascunho para o produtor (F7 do Bloco 4).
     chunks_nc = conn.execute(
         """
-        SELECT DISTINCT c.arquivo, COALESCE(c.secao, 'GERAL'), c.texto, d.produtor_id
+        SELECT DISTINCT c.arquivo, COALESCE(c.secao, 'GERAL'), c.texto, d.produtor_id,
+               d.tipo_doc, d.titulo, c.ordem
         FROM chunks c
         JOIN documentos d ON d.arquivo = c.arquivo
         WHERE (
             d.produtor_id = %s
             OR (d.tipo_doc = 'inspecao' AND c.texto ILIKE %s)
         )
-        ORDER BY c.arquivo
+        ORDER BY c.arquivo, c.ordem
         """,
         (prod_id, f'%{prod_id}%'),
     ).fetchall()
 
-    for arq_nc, secao_nc, texto_nc, doc_prod_id in chunks_nc:
-        if _chunk_tem_nc_para_produtor(texto_nc, prod_id, doc_prod_id):
-            _adicionar_fonte(Fonte(arquivo=arq_nc, referencia=secao_nc))
-            alertas.append(f'Não conformidade / apontamento ADAGRO registrado ({arq_nc}).')
-            break
+    ncs_por_documento: dict[str, tuple[str | None, str | None, list[str], str | None]] = {}
+    for arq_nc, secao_nc, texto_nc, doc_prod_id, tipo_doc, titulo, _ordem in chunks_nc:
+        blocos = [
+            b
+            for b in _blocos_do_produtor(texto_nc, prod_id, doc_prod_id)
+            if any(termo in b.lower() for termo in _TERMOS_NC_ADAGRO)
+        ]
+        if not blocos:
+            continue
+        _adicionar_fonte(Fonte(arquivo=arq_nc, referencia=secao_nc))
+        _tipo, _titulo, descricoes, resultado = ncs_por_documento.setdefault(
+            arq_nc, (tipo_doc, titulo, [], None)
+        )
+        for bloco in blocos:
+            for descricao in _descrever_ncs(bloco):
+                if descricao not in descricoes:
+                    descricoes.append(descricao)
+            if achado := re.search(r'RESULTADO GERAL:\s*([^\n]+)', bloco, re.IGNORECASE):
+                resultado = achado.group(1).strip().lower()
+        ncs_por_documento[arq_nc] = (tipo_doc, titulo, descricoes, resultado)
+
+    for arq_nc, (tipo_doc, titulo, descricoes, resultado) in ncs_por_documento.items():
+        rotulo_doc = _rotulo_documento(conn, arq_nc, tipo_doc, titulo)
+        detalhe = '; '.join(descricoes) if descricoes else 'situação irregular registrada'
+        alerta = f'{rotulo_doc} — {detalhe}.'
+        if resultado:
+            alerta += f' Resultado geral: {resultado}.'
+        alertas.append(alerta)
 
     # Verifica produtos de origem animal: exigem registro SIE e laudo sanitário
     produtos_info = conn.execute(

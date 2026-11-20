@@ -9,7 +9,11 @@ from sabor.agent.mascarador import Mascarador
 from sabor.db import conectar_readonly
 from sabor.tools import resumir_produtor
 from sabor.tools.base import SemPermissao
-from sabor.tools.resumir_produtor import _chunk_tem_nc_para_produtor, _mesmo_comprador
+from sabor.tools.resumir_produtor import (
+    _chunk_tem_nc_para_produtor,
+    _descrever_ncs,
+    _mesmo_comprador,
+)
 
 
 def _ctx(conn, usuario: str = 'Dona Lúcia') -> RunContext[AgentDeps]:
@@ -98,12 +102,46 @@ def test_produtores_regulares_na_adagro_nao_recebem_falso_positivo():
         res_p017 = resumir_produtor(_ctx(conn), 'P017')
 
     for res in (res_p001, res_p002, res_p005):
-        assert not any('inspecao_adagro' in a.lower() for a in res.alertas)
-        assert not any('não conformidade' in a.lower() for a in res.alertas)
+        assert not any('ADAGRO-AM-2026-0189' in a for a in res.alertas)
+        assert not any('NC-' in a for a in res.alertas)
 
-    assert any('laudo_sanitario_queijaria_cicero_p003' in a.lower() for a in res_p003.alertas)
-    assert not any('inspecao_adagro' in a.lower() for a in res_p003.alertas)
-    assert any('inspecao_adagro' in a.lower() for a in res_p017.alertas)
+    assert any('VS-CAE-2026-0034' in a for a in res_p003.alertas)
+    assert not any('ADAGRO' in a for a in res_p003.alertas)
+    assert any('ADAGRO-AM-2026-0189' in a for a in res_p017.alertas)
+
+
+def test_alerta_de_nc_diz_orgao_severidade_e_status_sem_caminho_de_arquivo():
+    """F7 do Bloco 4: o laudo do Cícero é da vigilância municipal, a NC é menor e o laudo foi
+    aprovado; o caminho interno do arquivo não vai para o rascunho do produtor."""
+    with conectar_readonly() as conn:
+        cicero = resumir_produtor(_ctx(conn), 'P003')
+        wellington = resumir_produtor(_ctx(conn), 'P017')
+
+    assert cicero.alertas[0] == (
+        'Laudo VS-CAE-2026-0034 (Vigilância Sanitária Municipal de Caetés) — NC-001 (menor): '
+        'Lixeira da área de embalagem sem acionamento por pedal (prazo: 30 dias (até '
+        '12/09/2026); status: pendente de verificação). Resultado geral: aprovado.'
+    )
+    assert 'laudos/' not in cicero.rascunho.conteudo
+    assert ('laudos/laudo_sanitario_queijaria_cicero_P003.txt', 'NÃO CONFORMIDADES') in {
+        (f.arquivo, f.referencia) for f in cicero.fontes
+    }  # a fonte continua registrada
+    assert wellington.alertas[0].startswith(
+        'Inspeção ADAGRO-AM-2026-0189 (Agência de Defesa Agropecuária de Pernambuco) — '
+        'NC-001 (grave): Produtor P017 (frango caipira) sem registro SIE'
+    )
+
+
+def test_descrever_ncs_separa_cada_nao_conformidade():
+    bloco = (
+        'NC-001 (GRAVE): Produtor P017 sem registro SIE.\n  Prazo: Imediato.\n\n'
+        'NC-002 (MENOR): Termômetro descalibrado.\n  Prazo: 15 dias.\n  Status: Resolvida'
+    )
+    assert _descrever_ncs(bloco) == [
+        'NC-001 (grave): Produtor P017 sem registro SIE (prazo: Imediato)',
+        'NC-002 (menor): Termômetro descalibrado (prazo: 15 dias; status: resolvida)',
+    ]
+    assert _descrever_ncs('Situação: IRREGULAR') == []
 
 
 def test_resumo_traz_situacao_da_certificacao_e_sie():

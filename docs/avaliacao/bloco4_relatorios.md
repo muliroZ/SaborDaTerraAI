@@ -215,6 +215,26 @@ Severidade: **alta** dá resposta errada ao operador numa função central; **m�
   - Montar o alerta com o órgão e a severidade do documento de origem, por exemplo: "Laudo VS-CAE-2026-0034: NC-001 (menor), pendente de verificação desde 12/09/2026".
   - Tirar o caminho do arquivo do texto do rascunho; ele já fica em `fontes`.
 
+**Status: resolvido.**
+
+- **Correção:** o alerta de NC em `resumir_produtor` é montado a partir do documento de origem, e não de um texto fixo.
+  - Tipo, número e órgão vêm do cabeçalho (`_rotulo_documento`).
+  - Código, severidade, prazo e status de cada NC vêm do trecho de não conformidades (`_descrever_ncs`).
+  - O resultado geral entra quando o documento traz.
+  - O alerta não cita mais o caminho do arquivo; a fonte continua em `fontes`.
+  - Os alertas viram também as flags de conformidade (ver o [F5](#f5)), então a correção chega ao rascunho, às flags e ao texto.
+- **Exemplos:**
+  - P003: "Laudo VS-CAE-2026-0034 (Vigilância Sanitária Municipal de Caetés) — NC-001 (menor): Lixeira da área de embalagem sem acionamento por pedal (prazo: 30 dias (até 12/09/2026); status: pendente de verificação). Resultado geral: aprovado."
+  - P017: "Inspeção ADAGRO-AM-2026-0189 (Agência de Defesa Agropecuária de Pernambuco) — NC-001 (grave): Produtor P017 (frango caipira) sem registro SIE (prazo: Imediato)."
+- **Testes:**
+  - `test_alerta_de_nc_diz_orgao_severidade_e_status_sem_caminho_de_arquivo`;
+  - `test_descrever_ncs_separa_cada_nao_conformidade`;
+  - `test_produtores_regulares_na_adagro_nao_recebem_falso_positivo`, ajustado para verificar o número do documento em vez do caminho.
+- **Validação com o agente:**
+  - No REL-04 (3 rodadas), o texto deixou de atribuir o laudo à ADAGRO, descreve a NC como menor, com o laudo aprovado, e o rascunho não traz `laudos/`.
+  - No resumo do P017, a NC-001 grave segue atribuída à ADAGRO.
+  - Nenhum turno foi bloqueado pelo guardrail.
+
 ### F8
 
 **Fontes malformadas. Severidade: baixa.**
